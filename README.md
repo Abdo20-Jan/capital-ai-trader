@@ -7,7 +7,35 @@ real, mede o sentimento com IA, combina com um modelo de Machine Learning e envi
 > ⚠️ Projeto educacional. O cliente da Capital.com **recusa a URL da conta real** de propósito.
 > CFDs são alavancados e a maioria das contas de varejo perde dinheiro. Nenhum modelo garante lucro.
 
-## Como funciona
+## ▶ App completo (recomendado)
+
+```bash
+python run.py app
+```
+
+Depois abra **http://localhost:8000** no Safari. Sem configurar nada, o app abre no
+**simulador** (preços e notícias sintéticos, ordens simuladas). Para operar na sua conta
+demo, vá na aba **Conexão**, cole a chave da API, clique em **Testar**, escolha a conta e
+**Salvar e conectar**. Os agentes passam a operar na Capital.com na hora, sem reiniciar.
+
+### O que tem dentro
+
+| Parte | O que faz |
+|---|---|
+| **Preços ao vivo** | WebSocket oficial da Capital.com (`marketData.subscribe`, ping a cada 5 min, reconexão automática). |
+| **Notícias contínuas** | Yahoo e Google News por ativo + MarketWatch, Investing.com e Seeking Alpha, uma fonte a cada 6 s em rodízio. Cada manchete é analisada (Claude ou dicionário) e aparece na hora. |
+| **Agente Scalper** | Gráfico de 1 min, recuos na micro-tendência, stop/alvo curtos, máx. 20 min posicionado, filtro de spread. |
+| **Agente Day Trader (ML)** | Gráfico de 15 min, modelo de Machine Learning + sentimento, zera antes do fim do dia. |
+| **Agente Swing** | Gráfico de 4 h, tendência EMA 50/200, entra no fim dos recuos, segura por dias. |
+| **Agente Longo Prazo** | Gráfico diário, só compra em tendência de longo prazo, sai abaixo da média de 200 dias. |
+| **Agente de Notícias (IA)** | Reage em segundos a manchetes relevantes, na direção do sentimento. |
+| **Gestor de risco** | Banca virtual, risco por trade por agente, limite de margem e exposição, perda diária, meta, bloqueio de posições opostas no mesmo ativo, limite de ordens/hora da API, pausa geral. Mais risco para agentes que vão bem, menos para os que vão mal; pausa automática do agente com resultado ruim. |
+| **Painel** | Abas Painel, Agentes (ligar/desligar e ajustar cada um), Notícias, Ordens (fechar posições), Mercados (cotações e candles com entrada/stop/alvo), Conexão. Tudo atualiza em tempo real. |
+
+O app escuta só em `127.0.0.1` (o seu próprio computador). As credenciais ficam no `.env`
+com permissão só para o seu usuário.
+
+## Como funciona (bot simples de linha de comando)
 
 ```
 Notícias (Yahoo RSS) → dedup → Sentimento + tema (Claude ou dicionário)

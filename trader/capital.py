@@ -18,6 +18,7 @@ from .broker import Account, Candle, MarketRules, OrderResult, Position, Quote
 log = logging.getLogger(__name__)
 
 DEMO_BASE_URL = "https://demo-api-capital.backend-capital.com"
+STREAM_URL = "wss://api-streaming-capital.backend-capital.com/connect"
 SESSION_TTL = 9 * 60          # renova antes dos 10 minutos de inatividade
 MIN_INTERVAL = 0.12           # ~8 req/s, abaixo do limite de 10 req/s
 
@@ -125,6 +126,19 @@ class CapitalClient:
         if r.status_code >= 400:
             raise CapitalError(r.status_code, r.text, path)
         return r.json() if r.content else {}
+
+    def session_tokens(self) -> tuple[str, str]:
+        """(CST, X-SECURITY-TOKEN) válidos — usados pelo WebSocket de preços."""
+        with self._lock:
+            self._ensure_session()
+            return self._cst or "", self._token or ""
+
+    def preferences(self) -> dict:
+        return self._request("GET", "/api/v1/accounts/preferences")
+
+    def now(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc)
 
     def ping(self) -> dict:
         return self._request("GET", "/api/v1/ping")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ponto de entrada.
 
+  python run.py app         APP COMPLETO: agentes + notícias + ordens ao vivo → http://localhost:8000
   python run.py check       testa a conexão (Capital.com demo, notícias, IA)
   python run.py train       treina o modelo de ML e promove se for melhor
   python run.py backtest    backtest walk-forward + chance de $60 → $100
@@ -186,7 +187,7 @@ def cmd_dashboard(s, port: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Bot de trading com IA para a conta DEMO da Capital.com")
     ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all", "reset",
-                                       "test-order"])
+                                       "test-order", "app"])
     ap.add_argument("term", nargs="?", help="termo de busca (para 'search')")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--sell", action="store_true", help="test-order: testar uma VENDA em vez de compra")
@@ -200,6 +201,12 @@ def main() -> int:
 
     if a.command == "check":
         return cmd_check(s)
+    if a.command == "app":
+        import uvicorn
+        from app.main import create_app
+        print(f"App: abra http://localhost:{a.port} no navegador (Ctrl+C para parar)")
+        uvicorn.run(create_app(), host="127.0.0.1", port=a.port, log_level="warning")
+        return 0
     if a.command == "test-order":
         return cmd_test_order(s, (a.term or (s.watchlist[0].epic if s.watchlist else "")).upper(),
                               "SELL" if a.sell else "BUY", a.yes)

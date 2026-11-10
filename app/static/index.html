@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capital AI Trader</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">CAPITAL AI TRADER</div>
+  <nav id="tabs">
+    <a href="#painel" data-tab="painel">Painel</a>
+    <a href="#agentes" data-tab="agentes">Agentes</a>
+    <a href="#noticias" data-tab="noticias">Notícias</a>
+    <a href="#ordens" data-tab="ordens">Ordens</a>
+    <a href="#mercados" data-tab="mercados">Mercados</a>
+    <a href="#conexao" data-tab="conexao">Conexão</a>
+  </nav>
+  <div class="top-right">
+    <span class="pill" id="mode-pill">…</span>
+    <span class="pill" id="live-pill"><i class="dot"></i>ao vivo</span>
+    <button class="btn warn" id="kill-btn" type="button">Pausar tudo</button>
+    <button class="btn ghost" id="theme-btn" type="button">Tema</button>
+  </div>
+</header>
+<div class="ticker" id="tape" aria-label="Cotações ao vivo"></div>
+<div class="banner" id="banner" hidden></div>
+
+<main>
+  <!-- ================= PAINEL ================= -->
+  <section class="tab" id="tab-painel">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid g-2-1">
+      <div class="card">
+        <h2>Patrimônio da banca <small id="eq-sub"></small></h2>
+        <div class="chart" id="eq-chart"></div>
+      </div>
+      <div class="card">
+        <h2>Agentes <small><a href="#agentes">detalhes →</a></small></h2>
+        <div id="agent-mini"></div>
+      </div>
+    </div>
+    <div class="grid g-3">
+      <div class="card"><h2>Notícias ao vivo <small id="news-rate"></small></h2><ul class="feed" id="news-live"></ul></div>
+      <div class="card"><h2>Ordens e decisões ao vivo</h2><ul class="feed" id="dec-live"></ul></div>
+      <div class="card"><h2>Posições abertas <small id="pos-count"></small></h2><div id="pos-mini"></div></div>
+    </div>
+  </section>
+
+  <!-- ================= AGENTES ================= -->
+  <section class="tab" id="tab-agentes" hidden>
+    <p class="lead">Cada agente tem um estilo e um tempo gráfico. Eles só <b>propõem</b> ordens: o gestor de risco decide se a ordem vai para a corretora. Agentes com resultado ruim nos últimos 15+ trades são pausados automaticamente.</p>
+    <div class="agents" id="agents"></div>
+    <div class="card">
+      <h2>Regras gerais de risco</h2>
+      <form class="risk-form" id="risk-form">
+        <label>Banca inicial ($)<input name="start_balance" type="number" step="1" min="1"></label>
+        <label>Meta ($)<input name="target_balance" type="number" step="1" min="1"></label>
+        <label>Perda máx. no dia (%, 0 = desligado)<input name="max_daily_loss" type="number" step="0.5" min="0" max="100"></label>
+        <label class="chk"><input name="stop_at_target" type="checkbox"> Parar ao atingir a meta</label>
+        <div class="row"><button class="btn" type="submit">Salvar regras</button>
+          <button class="btn ghost" type="button" id="reset-bank">Reiniciar banca virtual</button>
+          <button class="btn ghost" type="button" id="retrain">Retreinar modelo ML</button></div>
+      </form>
+      <div id="model-box" class="muted small"></div>
+    </div>
+  </section>
+
+  <!-- ================= NOTÍCIAS ================= -->
+  <section class="tab" id="tab-noticias" hidden>
+    <div class="grid g-1-2">
+      <div class="card"><h2>Sentimento por ativo <small>últimas 6 h</small></h2><div id="sent-bars"></div>
+        <h2 style="margin-top:16px">Fontes</h2><div id="sources" class="small"></div></div>
+      <div class="card">
+        <h2>Fluxo de notícias
+          <span class="filters"><select id="nf-ticker"><option value="">todos os ativos</option></select>
+          <label class="chk small"><input type="checkbox" id="nf-rel"> só relevantes</label></span></h2>
+        <ul class="feed tall" id="news-all"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ORDENS ================= -->
+  <section class="tab" id="tab-ordens" hidden>
+    <div class="card"><h2>Posições abertas <span class="filters"><button class="btn danger sm" id="close-all" type="button">Fechar todas</button></span></h2><div class="scroll-x" id="pos-full"></div></div>
+    <div class="grid g-2">
+      <div class="card"><h2>Decisões do gestor de risco</h2><div class="scroll" id="dec-table"></div></div>
+      <div class="card"><h2>Trades fechados</h2><div class="scroll" id="trades-table"></div></div>
+    </div>
+    <div class="card"><h2>Eventos</h2><ul class="feed" id="events"></ul></div>
+  </section>
+
+  <!-- ================= MERCADOS ================= -->
+  <section class="tab" id="tab-mercados" hidden>
+    <div class="quotes" id="quotes"></div>
+    <div class="card">
+      <h2><span id="chart-title">Gráfico</span>
+        <span class="filters"><select id="chart-res">
+          <option value="MINUTE">1 min</option><option value="MINUTE_5">5 min</option><option value="MINUTE_15" selected>15 min</option>
+          <option value="HOUR">1 h</option><option value="HOUR_4">4 h</option><option value="DAY">diário</option></select></span></h2>
+      <div class="chart tall" id="px-chart"></div>
+      <div class="legend small"><span><i class="sw up"></i>candle de alta</span><span><i class="sw dn"></i>candle de baixa</span><span><i class="sw ln"></i>entrada / stop / alvo das posições</span></div>
+    </div>
+  </section>
+
+  <!-- ================= CONEXÃO ================= -->
+  <section class="tab" id="tab-conexao" hidden>
+    <div class="grid g-2">
+      <div class="card">
+        <h2>Conectar à Capital.com (conta DEMO)</h2>
+        <div id="conn-status" class="status-box"></div>
+        <ol class="steps">
+          <li>Na Capital.com, ative a <b>autenticação em dois fatores</b>.</li>
+          <li>Vá em <b>Configurações → API integrations → Generate new key</b>, crie uma <b>senha para a chave</b> e copie a chave.</li>
+          <li>Preencha abaixo, clique em <b>Testar</b>, escolha a conta demo e clique em <b>Salvar e conectar</b>.</li>
+        </ol>
+        <form id="conn-form" autocomplete="off">
+          <label>Chave da API<input name="api_key" type="password" placeholder="deixe vazio para manter a atual"></label>
+          <label>E-mail de login da Capital.com<input name="identifier" type="email"></label>
+          <label>Senha da CHAVE de API (não é a senha da conta)<input name="password" type="password" placeholder="deixe vazio para manter a atual"></label>
+          <label>Conta demo<select name="account_id"><option value="">padrão da Capital.com</option></select></label>
+          <div class="row">
+            <button class="btn ghost" type="button" id="conn-test">Testar</button>
+            <button class="btn" type="submit">Salvar e conectar</button>
+            <button class="btn ghost" type="button" id="conn-sim">Voltar ao simulador</button>
+          </div>
+        </form>
+        <div id="conn-result" class="small"></div>
+        <p class="muted small">As credenciais ficam só no arquivo <code>.env</code> do seu computador (permissão só para o seu usuário). O app recusa a conta real: só opera no servidor DEMO.</p>
+      </div>
+      <div class="card">
+        <h2>Ordem de teste</h2>
+        <p class="small">Abre a menor posição possível na sua conta demo, confere se ela aparece e fecha em seguida. Depois confira no app da Capital.com.</p>
+        <div class="row"><select id="to-epic"></select><button class="btn" id="to-btn" type="button">Enviar ordem de teste</button></div>
+        <div id="to-result" class="small"></div>
+        <h2 style="margin-top:18px">Status</h2>
+        <table class="kv" id="sys-status"></table>
+      </div>
+    </div>
+  </section>
+</main>
+<footer class="foot">Conta DEMO / simulação. Resultados passados ou simulados não garantem resultados futuros. CFDs são alavancados e a maioria das contas de varejo perde dinheiro.</footer>
+<div class="tip" id="tip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

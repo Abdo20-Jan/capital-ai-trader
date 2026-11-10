@@ -92,7 +92,8 @@ def parse_watchlist(raw: str) -> list[WatchItem]:
 
 def get_settings() -> Settings:
     load_dotenv()
-    data_dir = Path(_s("DATA_DIR", str(ROOT / "data")))       # no Railway: volume persistente (ex.: /data)
+    # DATA_DIR explícito > volume do Railway (variável criada pelo próprio Railway) > pasta local
+    data_dir = Path(_s("DATA_DIR", _s("RAILWAY_VOLUME_MOUNT_PATH", str(ROOT / "data"))))
     db = Path(_s("DB_PATH", str(data_dir / "trader.db")))
     if not db.is_absolute():
         db = ROOT / db

@@ -7,3 +7,4 @@ models/*.pkl
 models/*.json
 .pytest_cache/
 capital-ai-trader.zip
+data/.app_secret

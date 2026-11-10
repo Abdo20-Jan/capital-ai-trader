@@ -162,11 +162,13 @@ class ResearchAgent:
         while True:
             epics = self.ctx.epics
             per = max(10.0, self.interval_min * 60 / max(len(epics), 1))
+            researched = 0
             for epic in epics:
                 alp = getattr(self.ctx, "alpaca", None)
                 if alp is not None and self.ctx.mode == "papel" and not alp.supports(epic):
                     self.briefs.pop(epic, None)
                     continue
+                researched += 1
                 try:
                     self.status = f"pesquisando {epic}"
                     await self.research(epic)
@@ -177,6 +179,11 @@ class ResearchAgent:
                     self.ctx.event(f"Pesquisa {epic} falhou: {e}", "error")
                 self.status = "ativo"
                 await asyncio.sleep(per)
+            if researched == 0:
+                # nenhum ativo com dados reais (ex.: sem chaves da Alpaca): ESPERA antes de tentar de novo.
+                # Sem esta pausa o laço girava sem parar e travava o servidor inteiro.
+                self.status = "aguardando dados reais (configure a Alpaca)"
+                await asyncio.sleep(60)
 
     async def dossier(self, epic: str) -> dict:
         ticker = self.ctx.ticker_for(epic)

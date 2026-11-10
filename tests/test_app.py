@@ -367,3 +367,47 @@ def test_public_server_blocks_without_password_and_requires_login(tmp_path, monk
         tok = c.post("/api/login", json={"password": "abc123"}).json()["token"]
         assert c.get("/api/state", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
         assert c.get(f"/api/candles?epic=AAPL&token={tok}").status_code == 200        # token na URL (SSE)
+
+
+def test_research_loop_yields_when_no_asset_has_data():
+    """Regressão: sem chaves da Alpaca o laço de pesquisa girava sem pausa e travava o servidor."""
+    from types import SimpleNamespace
+    from app.research import ResearchAgent
+    ra = ResearchAgent.__new__(ResearchAgent)
+    ra.ctx = SimpleNamespace(epics=["AAPL", "MSFT"], mode="papel",
+                             alpaca=SimpleNamespace(supports=lambda e: False))
+    ra.interval_min, ra.briefs, ra.status = 30, {}, ""
+
+    async def main():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        hb = asyncio.create_task(heartbeat())
+        orig = asyncio.sleep
+
+        async def fast_sleep(t):                     # encurta as esperas longas, mantém o ceder do laço
+            await orig(min(t, 0.05))
+        import app.research as mod
+        mod.asyncio.sleep = fast_sleep
+        try:
+            task = asyncio.create_task(ra.run())
+            await orig(0.5)
+            task.cancel()
+        finally:
+            mod.asyncio.sleep = orig
+        hb.cancel()
+        return ticks
+
+    import threading
+    out = {}
+    t = threading.Thread(target=lambda: out.update(ticks=asyncio.run(main())), daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "o laço de pesquisa travou o event loop (servidor não responderia)"
+    assert out["ticks"] > 10, "o servidor ficou travado pelo laço de pesquisa"
+    assert "aguardando" in ra.status

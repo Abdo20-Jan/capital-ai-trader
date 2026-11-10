@@ -1,0 +1,9 @@
+anthropic>=2.7
+requests>=2.31
+feedparser>=6.0
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+fastapi>=0.110
+uvicorn>=0.29
+pytest>=8.0

@@ -7,6 +7,7 @@
   python run.py bot         roda o bot
   python run.py dashboard   abre o painel em http://localhost:8000
   python run.py all         bot + painel juntos
+  python run.py test-order EURUSD   ordem de teste mínima na conta demo (abre e fecha)
   python run.py reset       recomeça a banca virtual (ex.: em $60) sem apagar o aprendizado
 """
 from __future__ import annotations
@@ -33,7 +34,8 @@ def make_broker(s):
         return PaperBroker([w.epic for w in s.watchlist], start_balance=s.start_balance, leverage=s.max_leverage,
                            history=max(600, s.history_bars))
     from trader.capital import CapitalClient
-    return CapitalClient(s.capital_api_key, s.capital_identifier, s.capital_password)
+    return CapitalClient(s.capital_api_key, s.capital_identifier, s.capital_password,
+                         account_id=s.capital_account_id)
 
 
 def make_engine(s):
@@ -48,10 +50,21 @@ def cmd_check(s) -> int:
     print(f"Corretora: {s.broker}")
     broker = make_broker(s)
     try:
+        if s.broker == "capital_demo":
+            broker.login()
+            print("  ✔ login na Capital.com (servidor DEMO)")
+            for a in broker.accounts():
+                b = a.get("balance", {})
+                mark = "  ◀ em uso pelo bot" if a.get("accountId") == broker.current_account_id else ""
+                print(f"    conta {a.get('accountId')}  {a.get('accountName', '')[:24]:<24} "
+                      f"{a.get('accountType', ''):<10} saldo {b.get('balance', 0):>12,.2f} {a.get('currency', '')}{mark}")
         acct = broker.account()
         print(f"  ✔ conta: saldo {acct.balance:.2f} {acct.currency}, disponível {acct.available:.2f}")
     except Exception as e:  # noqa: BLE001
         print(f"  ✘ conta: {e}")
+        if "401" in str(e) or "400" in str(e):
+            print("    dica: confira CAPITAL_API_KEY, CAPITAL_IDENTIFIER (e-mail de login) e CAPITAL_PASSWORD "
+                  "(a senha criada junto com a chave de API, não a senha da conta).")
         return 1
     for w in s.watchlist:
         try:
@@ -71,6 +84,42 @@ def cmd_check(s) -> int:
         print(f"  {'✔' if items else '✘'} notícias RSS: {len(items)} manchetes para {s.watchlist[0].ticker}")
     print(f"IA de sentimento: {'Claude (' + s.claude_model + ')' if s.use_claude else 'dicionário (sem ANTHROPIC_API_KEY)'}")
     return 0 if ok else 1
+
+
+def cmd_test_order(s, epic: str, direction: str, yes: bool) -> int:
+    """Abre a menor posição possível na conta demo, confere que apareceu e fecha em seguida."""
+    import time
+    if s.broker != "capital_demo":
+        print("Este teste só faz sentido com BROKER=capital_demo no .env")
+        return 1
+    c = make_broker(s)
+    c.login()
+    acct, r, q = c.account(), c.rules(epic), c.quote(epic)
+    if not q.tradeable:
+        print(f"O mercado {epic} está fechado agora. Tente outro (ex.: um par de moedas) ou em horário de pregão.")
+        return 1
+    entry = q.ask if direction == "BUY" else q.bid
+    dist = max(entry * 0.01, r.min_stop_distance * 1.5)
+    sign = 1 if direction == "BUY" else -1
+    stop, target = round(entry - sign * dist, r.decimals), round(entry + sign * dist, r.decimals)
+    print(f"Conta demo {c.current_account_id}: saldo {acct.balance:,.2f} {acct.currency}")
+    print(f"Ordem de teste: {direction} {r.min_size:g} {epic} ({r.name}) a ~{entry:.{r.decimals}f}, "
+          f"stop {stop}, alvo {target}, margem ~{r.min_size * entry * r.margin_factor:,.2f}")
+    if not yes and input("Enviar e fechar logo em seguida? Digite SIM: ").strip().upper() != "SIM":
+        print("Cancelado.")
+        return 1
+    res = c.open_position(epic, direction, r.min_size, stop, target)
+    print(f"  {'✔' if res.ok else '✘'} abertura: {res.message} (deal {res.deal_id}, preço {res.level})")
+    if not res.ok:
+        return 1
+    time.sleep(3)
+    pos = next((p for p in c.positions() if p.deal_id == res.deal_id), None)
+    print(f"  {'✔' if pos else '✘'} posição {'aparece' if pos else 'NÃO aparece'} na conta"
+          + (f" (resultado agora: {pos.upl:+.2f})" if pos else ""))
+    closed = c.close_position(res.deal_id)
+    print(f"  {'✔' if closed.ok else '✘'} fechamento: {closed.message}")
+    print("Confira em capital.com (conta Demo → histórico): a ordem de teste deve aparecer lá.")
+    return 0 if (pos and closed.ok) else 1
 
 
 def cmd_search(s, term: str) -> int:
@@ -136,9 +185,12 @@ def cmd_dashboard(s, port: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Bot de trading com IA para a conta DEMO da Capital.com")
-    ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all", "reset"])
+    ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all", "reset",
+                                       "test-order"])
     ap.add_argument("term", nargs="?", help="termo de busca (para 'search')")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--sell", action="store_true", help="test-order: testar uma VENDA em vez de compra")
+    ap.add_argument("--yes", action="store_true", help="test-order: não pedir confirmação")
     ap.add_argument("--steps", type=int, default=None, help="número de ciclos (padrão: infinito)")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
@@ -148,6 +200,9 @@ def main() -> int:
 
     if a.command == "check":
         return cmd_check(s)
+    if a.command == "test-order":
+        return cmd_test_order(s, (a.term or (s.watchlist[0].epic if s.watchlist else "")).upper(),
+                              "SELL" if a.sell else "BUY", a.yes)
     if a.command == "search":
         return cmd_search(s, a.term or "")
     if a.command == "train":

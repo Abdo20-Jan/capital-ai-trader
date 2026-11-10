@@ -42,7 +42,7 @@ class CapitalClient:
     name = "capital_demo"
 
     def __init__(self, api_key: str, identifier: str, password: str,
-                 base_url: str = DEMO_BASE_URL, http: requests.Session | None = None):
+                 base_url: str = DEMO_BASE_URL, http: requests.Session | None = None, account_id: str = ""):
         if "demo-api-capital" not in base_url:
             raise ValueError("Este bot só opera na conta DEMO da Capital.com.")
         if not (api_key and identifier and password):
@@ -58,6 +58,8 @@ class CapitalClient:
         self._last_call = 0.0
         self._lock = threading.Lock()
         self._rules_cache: dict[str, MarketRules] = {}
+        self.account_id = account_id.strip()      # conta demo escolhida (vazio = a da sessão)
+        self.current_account_id: str | None = None
 
     # ------------------------------------------------------------------ sessão
     def login(self) -> dict:
@@ -74,8 +76,27 @@ class CapitalClient:
         if not (self._cst and self._token):
             raise CapitalError(r.status_code, "resposta sem CST/X-SECURITY-TOKEN", "/api/v1/session")
         self._last_used = time.time()
-        log.info("Sessão Capital.com (demo) aberta")
-        return r.json()
+        data = r.json() if r.content else {}
+        self.current_account_id = data.get("currentAccountId")
+        if self.account_id and self.account_id != self.current_account_id:
+            self._switch_account(self.account_id)
+        log.info("Sessão Capital.com (demo) aberta na conta %s", self.current_account_id)
+        return data
+
+    def _switch_account(self, account_id: str) -> None:
+        """Troca a conta ativa da sessão (PUT /api/v1/session). Chamado já com o lock."""
+        r = self.http.request(
+            "PUT", f"{self.base_url}/api/v1/session", json={"accountId": account_id}, timeout=20,
+            headers={"CST": self._cst or "", "X-SECURITY-TOKEN": self._token or "",
+                     "Content-Type": "application/json"},
+        )
+        if r.status_code != 200:
+            raise CapitalError(r.status_code, f"não foi possível usar a conta {account_id} "
+                               f"(confira CAPITAL_ACCOUNT_ID com 'python run.py check'): {r.text}",
+                               "/api/v1/session")
+        self._cst = r.headers.get("CST") or self._cst
+        self._token = r.headers.get("X-SECURITY-TOKEN") or self._token
+        self.current_account_id = account_id
 
     def _ensure_session(self) -> None:
         if not self._cst or time.time() - self._last_used > SESSION_TTL:
@@ -109,12 +130,15 @@ class CapitalClient:
         return self._request("GET", "/api/v1/ping")
 
     # ------------------------------------------------------------------ conta
+    def accounts(self) -> list[dict]:
+        return self._request("GET", "/api/v1/accounts").get("accounts", [])
+
     def account(self) -> Account:
-        data = self._request("GET", "/api/v1/accounts")
-        accounts = data.get("accounts", [])
+        accounts = self.accounts()
         if not accounts:
             raise CapitalError(200, "nenhuma conta retornada", "/api/v1/accounts")
-        acc = next((a for a in accounts if a.get("preferred")), accounts[0])
+        acc = (next((a for a in accounts if a.get("accountId") == self.current_account_id), None)
+               or next((a for a in accounts if a.get("preferred")), accounts[0]))
         b = acc.get("balance", {})
         balance = _num(b.get("balance"))
         pnl = _num(b.get("profitLoss"))

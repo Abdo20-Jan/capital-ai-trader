@@ -262,3 +262,55 @@ def test_candles_pagination():
     assert times == sorted(times) and len(set(times)) == len(times)
     assert len(http.calls) == 3
     assert len(c.candles("AAPL", "MINUTE_15", 9000)) < 9000           # para quando o histórico acaba
+
+
+# ------------------------------------------------------------------ escolha da conta demo + ordem de teste
+class AccountHTTP(FakeHTTP):
+    def __init__(self):
+        super().__init__()
+        self.open = {}
+        self.active = "A1"
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        super().post(url, headers, json, timeout)
+        r = FakeResp(200, {"currentAccountId": "A1"}, {"CST": "cst", "X-SECURITY-TOKEN": "tok"})
+        return r
+
+    def request(self, method, url, params=None, json=None, timeout=None, headers=None):
+        path = url.split(".com")[1]
+        if method == "PUT" and path == "/api/v1/session":
+            self.active = json["accountId"]
+            return FakeResp(200, {}, {"X-SECURITY-TOKEN": "tok"})
+        if path == "/api/v1/accounts":
+            self.calls.append((method, path, params, json))
+            return FakeResp(200, {"accounts": [
+                {"accountId": "A1", "preferred": True, "currency": "USD", "balance": {"balance": 1000, "profitLoss": 0, "available": 1000}},
+                {"accountId": "A2", "preferred": False, "currency": "USD", "balance": {"balance": 60, "profitLoss": 0, "available": 60}}]})
+        if path == "/api/v1/positions" and method == "GET":
+            return FakeResp(200, {"positions": [{"position": {"dealId": d, "direction": "BUY", "size": 1, "level": 200, "upl": -0.1},
+                                                 "market": {"epic": "AAPL"}} for d in self.open]})
+        if path == "/api/v1/positions/D1" and method == "DELETE":
+            self.open.pop("D1", None)
+            return FakeResp(200, {"dealReference": "p_1"})
+        resp = super().request(method, url, params, json, timeout, headers)
+        if path == "/api/v1/positions" and method == "POST":
+            self.open["D1"] = True
+        return resp
+
+
+def test_capital_selects_configured_demo_account():
+    http = AccountHTTP()
+    c = CapitalClient("key", "me", "pw", http=http, account_id="A2")
+    acct = c.account()
+    assert http.active == "A2" and c.current_account_id == "A2"
+    assert acct.balance == 60                      # usa a conta escolhida, não a "preferred"
+
+
+def test_test_order_opens_and_closes(monkeypatch):
+    import run
+    http = AccountHTTP()
+    monkeypatch.setattr(run, "make_broker", lambda s: CapitalClient("key", "me", "pw", http=http))
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    s = Settings(broker="capital_demo", watchlist=[WatchItem("AAPL", "AAPL")])
+    assert run.cmd_test_order(s, "AAPL", "BUY", yes=True) == 0
+    assert http.open == {}                          # abriu e fechou

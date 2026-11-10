@@ -50,6 +50,7 @@ class Settings:
     capital_api_key: str = ""
     capital_identifier: str = ""
     capital_password: str = ""
+    capital_account_id: str = ""
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5-5"
     watchlist: list[WatchItem] = field(default_factory=list)
@@ -99,6 +100,7 @@ def get_settings() -> Settings:
         capital_api_key=_s("CAPITAL_API_KEY", ""),
         capital_identifier=_s("CAPITAL_IDENTIFIER", ""),
         capital_password=_s("CAPITAL_PASSWORD", ""),
+        capital_account_id=_s("CAPITAL_ACCOUNT_ID", ""),
         anthropic_api_key=_s("ANTHROPIC_API_KEY", ""),
         claude_model=_s("CLAUDE_MODEL", "claude-opus-5-5"),
         watchlist=parse_watchlist(_s("WATCHLIST", "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA")),

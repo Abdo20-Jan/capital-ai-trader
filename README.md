@@ -66,12 +66,18 @@ python run.py all        # bot + painel em http://localhost:8000
    CAPITAL_IDENTIFIER=seu-email-de-login
    CAPITAL_PASSWORD=senha-personalizada-da-chave
    ```
-5. Teste e confira o tamanho mínimo e a margem de cada ativo:
+5. Teste a conexão. O `check` lista suas contas demo e marca a que o bot vai usar;
+   para usar outra, copie o ID dela para `CAPITAL_ACCOUNT_ID` no `.env`:
    ```bash
    python run.py check
    python run.py search nasdaq    # descobre o EPIC de outros mercados
    ```
-6. Rode:
+6. Faça uma ordem de teste (a menor possível; abre, confere e fecha na hora):
+   ```bash
+   python run.py test-order AAPL
+   ```
+   Depois confira no site/app da Capital.com, na conta Demo, se a operação aparece.
+7. Rode:
    ```bash
    python run.py train
    python run.py backtest

@@ -29,6 +29,7 @@ class BacktestResult:
     r_multiples: list[float] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
     skipped: dict[str, int] = field(default_factory=dict)
+    leverage_used: list[float] = field(default_factory=list)   # exposição / patrimônio em cada entrada
 
     @property
     def win_rate(self) -> float:
@@ -94,6 +95,7 @@ def run_backtest(frames: dict[str, pd.DataFrame], rules: dict, s: Settings, trai
                 del open_pos[e]
         # 2) entradas
         margin_used = sum(p["size"] * p["entry"] * rules[e].margin_factor for e, p in open_pos.items())
+        exposure = sum(p["size"] * p["entry"] for p in open_pos.values())
         for e, df in frames.items():
             if i >= len(df) - 1 or e in open_pos or len(open_pos) >= s.max_open_positions:
                 continue
@@ -109,12 +111,14 @@ def run_backtest(frames: dict[str, pd.DataFrame], rules: dict, s: Settings, trai
             stop_dist = max(s.stop_atr * atr[i], rules[e].min_stop_distance * 1.1)
             acct = Account(balance=equity, equity=equity, available=equity - margin_used)
             sz = position_size(acct, rules[e], entry, stop_dist, s.risk_per_trade, s.max_risk_per_trade,
-                               s.max_margin_usage, margin_used)
+                               s.max_margin_usage, margin_used, s.max_exposure, exposure)
             if not sz.ok:
                 key = sz.reason.split(":")[0].split(" ")[0]
                 res.skipped[key] = res.skipped.get(key, 0) + 1
                 continue
             margin_used += sz.margin
+            exposure += sz.notional
+            res.leverage_used.append(sz.notional / equity)
             open_pos[e] = {"dir": want, "entry": entry, "size": sz.size, "risk": sz.size * stop_dist,
                            "stop": entry - want * stop_dist,
                            "target": entry + want * stop_dist * s.take_profit_atr / s.stop_atr}

@@ -197,3 +197,15 @@ def test_claude_scorer_parses_and_falls_back():
     assert res[1].scorer == "dicionario" and res[1].sentiment < 0      # item ausente → fallback
     assert captured["output_config"]["format"]["type"] == "json_schema"
     assert captured["model"] == "claude-opus-5-5"
+
+
+def test_exposure_cap_with_200x_leverage():
+    rules = MarketRules(epic="EURUSD", name="EUR/USD", min_size=100, size_step=100,
+                        min_stop_distance=0.0001, margin_factor=1 / 200)
+    acct = Account(balance=60, equity=60, available=60)
+    # stop de 2 pips: pelo risco seriam 6.000 unidades (~$6.500 de exposição, ~108×)
+    d = position_size(acct, rules, price=1.08, stop_distance=0.0002, risk_per_trade=0.02,
+                      max_risk_per_trade=0.05, max_margin_usage=0.5, max_exposure=30)
+    assert d.ok and d.notional <= 60 * 30 + 1e-6
+    assert d.risk_amount < 1.2            # exposição limitada → risco menor que 2%
+    assert d.margin == pytest.approx(d.notional / 200)

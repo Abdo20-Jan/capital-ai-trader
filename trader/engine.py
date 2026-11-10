@@ -54,6 +54,7 @@ class Engine:
         self._last_bar: dict[str, str] = {}
         self._guard_msg = ""
         self._margin_in_use = 0.0
+        self._exposure_in_use = 0.0
         self.paper = broker.name == "paper"
 
     # ----------------------------------------------------------------- notícias
@@ -117,6 +118,7 @@ class Engine:
 
         open_epics = {p.epic for p in positions}
         self._margin_in_use = 0.0
+        self._exposure_in_use = sum(p.size * p.level for p in positions)
         for p in positions:
             try:
                 self._margin_in_use += p.size * p.level * self.broker.rules(p.epic).margin_factor
@@ -194,10 +196,12 @@ class Engine:
         stop_dist = max(self.s.stop_atr * atr, rules.min_stop_distance * 1.1, q.ask - q.bid)
         tp_dist = stop_dist * self.s.take_profit_atr / self.s.stop_atr
         sz = position_size(acct, rules, entry, stop_dist, self.s.risk_per_trade, self.s.max_risk_per_trade,
-                           self.s.max_margin_usage, self._margin_in_use)
+                           self.s.max_margin_usage, self._margin_in_use, self.s.max_exposure,
+                           self._exposure_in_use)
         if not sz.ok:
             return "NADA", f"{direction} ignorado: {sz.reason}"
         self._margin_in_use += sz.margin
+        self._exposure_in_use += sz.notional
         sign = 1 if direction == "BUY" else -1
         stop = round(entry - sign * stop_dist, rules.decimals)
         target = round(entry + sign * tp_dist, rules.decimals)
@@ -209,7 +213,8 @@ class Engine:
                               entry=res.level or entry, stop=stop, target=target, risk=round(sz.risk_amount, 2),
                               p=round(prob, 4), sentiment=sent)
         self.store.event(f"{'COMPRA' if direction == 'BUY' else 'VENDA'} {epic} tam {sz.size:g} @ {entry:.2f} "
-                         f"stop {stop} alvo {target} (risco ${sz.risk_amount:.2f}, p={prob:.2f}, sent={sent:+.2f})",
+                         f"stop {stop} alvo {target} (risco ${sz.risk_amount:.2f}, exposição ${sz.notional:,.0f} = {sz.notional / acct.equity:.1f}×, "
+                         f"margem ${sz.margin:.2f}, p={prob:.2f}, sent={sent:+.2f})",
                          "trade")
         return direction, f"aberta {res.deal_id}"
 

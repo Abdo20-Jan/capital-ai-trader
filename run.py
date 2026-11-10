@@ -24,7 +24,7 @@ log = logging.getLogger("run")
 def make_broker(s):
     if s.broker == "paper":
         from trader.paper import PaperBroker
-        return PaperBroker([w.epic for w in s.watchlist], start_balance=s.start_balance)
+        return PaperBroker([w.epic for w in s.watchlist], start_balance=s.start_balance, leverage=s.max_leverage)
     from trader.capital import CapitalClient
     return CapitalClient(s.capital_api_key, s.capital_identifier, s.capital_password)
 
@@ -95,6 +95,11 @@ def cmd_backtest(s) -> int:
     print(f"Saldo: ${res.start:.2f} → ${res.final:.2f} ({(res.final / res.start - 1):+.1%})")
     print(f"Trades: {res.trades} | acerto {res.win_rate:.0%} | expectativa {res.expectancy_r:+.3f}R | "
           f"drawdown máx {res.max_drawdown:.1%}")
+    if res.leverage_used:
+        import statistics
+        lv = res.leverage_used
+        print(f"Exposição por trade: média {statistics.mean(lv):.1f}× o patrimônio, máx {max(lv):.1f}× "
+              f"(teto {s.max_exposure:g}×, conta permite até {s.max_leverage:g}×)")
     if res.skipped:
         print(f"Sinais não executados: {res.skipped}")
     mc = monte_carlo(res.r_multiples, s.start_balance, s.target_balance, s.start_balance * 0.5, s.risk_per_trade)
@@ -103,6 +108,13 @@ def cmd_backtest(s) -> int:
     print(f"Atinge a meta: {mc['p_target']:.1%} | quebra: {mc['p_ruin']:.1%} | nenhum em 500 trades: {mc['p_neither']:.1%}")
     if mc["median_trades_to_target"]:
         print(f"Mediana de trades até a meta (quando atinge): {mc['median_trades_to_target']}")
+    if res.r_multiples:
+        print("\n=== E se arriscar mais por trade (usar mais da alavancagem)? ===")
+        print(f"{'risco/trade':>12} {'meta $' + format(s.target_balance, 'g'):>10} {'quebra $' + format(s.start_balance * 0.5, 'g'):>12} {'trades até a meta':>18}")
+        for rk in (0.01, 0.02, 0.05, 0.10, 0.25):
+            m = monte_carlo(res.r_multiples, s.start_balance, s.target_balance, s.start_balance * 0.5, rk)
+            print(f"{rk:>12.0%} {m['p_target']:>10.1%} {m['p_ruin']:>12.1%} {str(m['median_trades_to_target'] or '—'):>18}")
+        print("Mais risco por trade NÃO melhora a vantagem da estratégia; só acelera o resultado — para cima ou para baixo.")
     if s.broker == "paper":
         print("\n⚠ Dados SINTÉTICOS do simulador — isto testa o código, não prova nada sobre o mercado real.")
     return 0

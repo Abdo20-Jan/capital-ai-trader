@@ -35,8 +35,9 @@ class PaperBroker:
     name = "paper"
 
     def __init__(self, epics: list[str], start_balance: float = 60.0, seed: int | None = None,
-                 history: int = 600, bar_minutes: int = 15):
+                 history: int = 600, bar_minutes: int = 15, leverage: float = 200.0):
         self.rng = random.Random(seed)
+        self.margin_factor = 1 / max(leverage, 1)
         self.cash = start_balance
         self.bar = timedelta(minutes=bar_minutes)
         self._ids = itertools.count(1)
@@ -130,7 +131,7 @@ class PaperBroker:
     def rules(self, epic: str) -> MarketRules:
         price = self._series[epic][-1].close
         return MarketRules(epic=epic, name=f"{epic} (simulado)", min_size=0.1, size_step=0.1,
-                           min_stop_distance=price * 0.001, margin_factor=0.2)
+                           min_stop_distance=price * 0.001, margin_factor=self.margin_factor)
 
     def positions(self) -> list[Position]:
         out = []

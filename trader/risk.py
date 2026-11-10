@@ -14,6 +14,7 @@ class SizeDecision:
     risk_amount: float
     margin: float
     reason: str
+    notional: float = 0.0
 
 
 def round_down(x: float, step: float) -> float:
@@ -24,7 +25,8 @@ def round_down(x: float, step: float) -> float:
 
 def position_size(account: Account, rules: MarketRules, price: float, stop_distance: float,
                   risk_per_trade: float, max_risk_per_trade: float, max_margin_usage: float,
-                  margin_in_use: float = 0.0) -> SizeDecision:
+                  margin_in_use: float = 0.0, max_exposure: float = 30.0,
+                  exposure_in_use: float = 0.0) -> SizeDecision:
     """Tamanho tal que, se o stop for atingido, a perda ≈ risk_per_trade × patrimônio.
 
     Se o tamanho mínimo do ativo exigir arriscar mais que max_risk_per_trade, NÃO opera.
@@ -45,6 +47,15 @@ def position_size(account: Account, rules: MarketRules, price: float, stop_dista
                                 f"(> {max_risk_per_trade:.0%} de ${equity:.2f})")
         size = rules.min_size
     size = round(size, 6)
+    # Teto de exposição (valor nocional). Com alavancagem alta a margem quase não limita
+    # nada; é isto que impede, p.ex., $60 de controlar $12.000 com um stop apertado.
+    exp_limit = equity * max_exposure - exposure_in_use
+    if size * price > exp_limit:
+        size = round_down(max(exp_limit, 0) / price, rules.size_step)
+        if size < rules.min_size:
+            return SizeDecision(False, 0, 0, 0,
+                                f"exposição: mínimo vale ${rules.min_size * price:,.2f}, teto livre "
+                                f"${max(exp_limit, 0):,.2f} ({max_exposure:g}× o patrimônio)")
     margin = size * price * rules.margin_factor
     limit = equity * max_margin_usage - margin_in_use
     if margin > limit:
@@ -56,7 +67,7 @@ def position_size(account: Account, rules: MarketRules, price: float, stop_dista
         margin = size * price * rules.margin_factor
     if margin > account.available:
         return SizeDecision(False, 0, 0, margin, f"saldo disponível ${account.available:.2f} < margem ${margin:.2f}")
-    return SizeDecision(True, size, size * stop_distance, margin, "ok")
+    return SizeDecision(True, size, size * stop_distance, margin, "ok", size * price)
 
 
 @dataclass

@@ -99,6 +99,19 @@ que é bem mais fraco: a maioria das manchetes reais sai como neutra.
   bater a meta é parecida com a de perder metade da conta.
 - Rode **meses** na demo antes de pensar em dinheiro real.
 
+## Alavancagem 1:200
+
+A alavancagem define quanto de **margem** cada posição prende, não quanto você arrisca.
+Com 1:200, US$60 podem controlar até US$12.000, e uma oscilação de 0,5% contra
+zeraria a conta. Por isso o bot calcula o tamanho de cada posição pelo **stop**
+(2% do patrimônio por trade). A alavancagem alta só ajuda a destravar ativos que antes
+exigiam margem demais, e o `MAX_EXPOSURE` impede que um stop muito curto gere uma
+posição gigantesca (gaps e derrapagem passam por cima do stop).
+
+O `backtest` mostra uma tabela com a chance de bater a meta para 1%, 2%, 5%, 10% e 25% de
+risco por trade. Arriscar mais não aumenta a vantagem da estratégia; só faz o resultado,
+bom ou ruim, chegar mais rápido.
+
 ## Configuração (`.env`)
 
 | Variável | Padrão | Significado |
@@ -110,6 +123,8 @@ que é bem mais fraco: a maioria das manchetes reais sai como neutra.
 | `MAX_DAILY_LOSS` | 0.06 | Perda diária que pausa o bot |
 | `MAX_OPEN_POSITIONS` | 2 | Posições simultâneas |
 | `MAX_MARGIN_USAGE` | 0.5 | Fração máxima do patrimônio usada como margem |
+| `MAX_LEVERAGE` | 200 | Alavancagem da conta (1:200). Na demo, a margem real de cada ativo vem da API; aqui só vale para o simulador |
+| `MAX_EXPOSURE` | 30 | Valor total das posições ≤ 30× o patrimônio (com $60: no máximo $1.800) |
 | `STOP_ATR` / `TAKE_PROFIT_ATR` | 1.5 / 2.25 | Stop e alvo em múltiplos do ATR |
 | `PROB_THRESHOLD` | 0.50 | Probabilidade mínima do modelo para entrar |
 | `SENTIMENT_WEIGHT` | 0.10 | Quanto o sentimento desloca a probabilidade |

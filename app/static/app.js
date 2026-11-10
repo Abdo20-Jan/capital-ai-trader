@@ -270,10 +270,15 @@ function renderEvents() { $("events").innerHTML = S.events.slice(0, 80).map((e) 
 let chartEpic = null;
 const fmtVol = (v) => v == null ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + " bi" : v >= 1e6 ? (v / 1e6).toFixed(2) + " mi" : v >= 1e3 ? (v / 1e3).toFixed(1) + " mil" : Number(v).toFixed(v < 10 ? 4 : 0);
 function renderQuotes() {
+  const u = S.status.universe;
+  $("universe").innerHTML = u ? `<b>Agente Scanner:</b> ${esc(u.status)}. Catálogo da Capital.com: ${u.catalog} mercados · abertos por classe: ${
+    Object.entries(u.eligible_by_type || {}).map(([k, n]) => `${esc(k.toLowerCase())} ${n}`).join(", ")} · cripto excluída · atualiza a cada 5 min.`
+    : (S.status.mode === "capital" ? "" : "Lista fixa de ativos (o scanner de todos os mercados funciona com a Capital.com conectada).");
   const epics = S.status.epics || Object.keys(S.quotes);
   if (!chartEpic) chartEpic = epics[0];
   $("quotes").innerHTML = epics.map((e) => { const q = S.quotes[e] || {}; const v = S.volumes[e]; const ch = q.open ? (q.mid / q.open - 1) * 100 : 0;
     return `<div class="q ${e === chartEpic ? "sel" : ""}" data-q="${esc(e)}"><div class="e"><span>${esc(e)}</span><span class="chg ${updn(ch)} small">${signed(ch, 2)}%</span></div>
+      ${S.status.names?.[e] ? `<div class="ba" title="${esc(S.status.names[e].type)}">${esc((S.status.names[e].name || "").slice(0, 26))}</div>` : ""}
       <div class="p">${px(q.mid)}</div><div class="ba">bid ${px(q.bid)} · ask ${px(q.ask)}</div>
       <div class="vol" title="${v ? esc(`${v.source} · ${v.delay}`) : "sem volume consolidado"}">${v ? `vol. ${fmtVol(v.day_volume)} · RVOL ${v.rvol ?? "—"}${v.delayed ? " · 15′" : ""}` : "vol. —"}</div></div>`; }).join("");
 }

@@ -163,6 +163,10 @@ class CapitalClient:
     def market(self, epic: str) -> dict:
         return self._request("GET", f"/api/v1/markets/{epic}")
 
+    def all_markets(self) -> list[dict]:
+        """Catálogo completo de mercados (GET /api/v1/markets sem parâmetros)."""
+        return self._request("GET", "/api/v1/markets").get("markets", [])
+
     def search_markets(self, term: str) -> list[dict]:
         return self._request("GET", "/api/v1/markets", params={"searchTerm": term}).get("markets", [])
 

@@ -58,7 +58,13 @@ class NewsFeed:
     def _sources(self) -> list[tuple[str, str, str]]:
         """(nome, url, ticker fixo ou '' para detectar pelo título)."""
         out = []
-        for w in self.ctx.settings.watchlist:
+        names = getattr(self.ctx, "names", {}) or {}
+        for w in self.ctx.settings.watchlist[:24]:          # fontes por ativo: os 24 primeiros da seleção
+            info = names.get(w.epic) or {}
+            if info.get("type") and info["type"] != "SHARES":
+                q = requests.utils.quote(str(info.get("name") or w.ticker))
+                out.append((f"Google News {w.ticker}", GOOGLE_NEWS.format(q=q), w.ticker))
+                continue
             ysym, query = CRYPTO_NEWS.get(w.ticker.upper(), (w.ticker, f"{w.ticker}+stock"))
             out.append((f"Yahoo {w.ticker}", YAHOO_RSS.format(ticker=ysym), w.ticker))
             out.append((f"Google News {w.ticker}", GOOGLE_NEWS.format(q=query), w.ticker))

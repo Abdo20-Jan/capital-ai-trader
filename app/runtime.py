@@ -56,6 +56,9 @@ class Runtime:
         self.model_status = "não treinado"
         self.last_account: dict = {}
         self.volumes: dict[str, dict] = {}
+        self.names: dict[str, dict] = {}                 # epic -> {name, type} (vindo do scanner)
+        self.scanner = None
+        self._stream_task: asyncio.Task | None = None
         self._daily_vol: dict[str, tuple[float, float]] = {}
         self.agents = []
         self.orders: OrderManager | None = None
@@ -82,6 +85,31 @@ class Runtime:
 
     def sentiment(self, epic: str) -> float:
         return self.news.sentiment_for(self.ticker_for(epic)) if self.news else 0.0
+
+    def is_us_share(self, epic: str) -> bool:
+        """Ações (para volume consolidado da Alpaca). Sem scanner, vale a lista de favoritos."""
+        t = (self.names.get(epic) or {}).get("type")
+        return (t == "SHARES" and epic.isalpha()) if t else not is_crypto(epic)
+
+    async def set_universe(self, items, names: dict) -> None:
+        """Troca os ativos operados (chamado pelo Agente Scanner)."""
+        self.names.update(names)
+        old = [w.epic for w in self.settings.watchlist]
+        new = [w.epic for w in items]
+        if old == new:
+            return
+        self.settings.watchlist = list(items)
+        if self.market:
+            self.market.epics = new
+        if self.mode == "capital" and self._stream_task:
+            self._stream_task.cancel()                  # reassina o canal ao vivo com a nova lista
+            self._stream_task = asyncio.create_task(self.market.run_capital_stream())
+            self.tasks.append(self._stream_task)
+        added, removed = [e for e in new if e not in old], [e for e in old if e not in new]
+        self.event(f"Scanner: {len(new)} ativos em operação"
+                   + (f" · entraram {', '.join(added[:12])}{'…' if len(added) > 12 else ''}" if added else "")
+                   + (f" · saíram {', '.join(removed[:12])}{'…' if len(removed) > 12 else ''}" if removed else ""), "info")
+        self.bus.publish("status", self.status())
 
     def research_bias(self, epic: str) -> float:
         return self.research.bias(epic) if self.research else 0.0
@@ -173,7 +201,16 @@ class Runtime:
             add(self.news.run_sim())
         else:
             if self.mode == "capital":
-                add(self.market.run_capital_stream())
+                self._stream_task = asyncio.create_task(self.market.run_capital_stream())
+                self.tasks.append(self._stream_task)
+                if os.environ.get("UNIVERSE_MODE", "all").lower() != "watchlist":
+                    from .universe import UniverseScanner
+                    self.scanner = UniverseScanner(self)
+                    try:                                  # primeira varredura antes de os agentes começarem
+                        await asyncio.wait_for(self.scanner.scan(), timeout=60)
+                    except Exception as e:  # noqa: BLE001
+                        self.event(f"Scanner: primeira varredura falhou ({e}); usando a lista de favoritos", "warn")
+                    add(self.scanner.run())
             else:
                 add(self.market.run_paper_quotes(self.alpaca, self.broker, self.orders.on_sim_closed))
             add(self.news.run())
@@ -194,6 +231,7 @@ class Runtime:
         self.bus.publish("status", self.status())
 
     async def stop(self) -> None:
+        self.scanner, self._stream_task = None, None
         for t in self.tasks:
             t.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -249,7 +287,7 @@ class Runtime:
         while True:
             try:
                 if self.alpaca.has_keys:
-                    stocks = [e for e in self.epics if not is_crypto(e)]
+                    stocks = [e for e in self.epics if self.is_us_share(e)]
                     cons = await asyncio.to_thread(self.alpaca.consolidated_volume, stocks)
                     for epic, v in cons.items():
                         avg = await self._avg_daily_volume(epic)
@@ -340,6 +378,7 @@ class Runtime:
                              "sec": self.research.sec.status if self.research else "",
                              "stocktwits": self.research.twits.status if self.research else "",
                              "interval_min": self.research.interval_min if self.research else None},
+                "universe": self.scanner.info() if self.scanner else None, "names": self.names,
                 "alpaca": {"keys": bool(self.alpaca and self.alpaca.has_keys), "feed": self.alpaca.feed if self.alpaca else "",
                            "error": self.alpaca.last_error if self.alpaca else ""},
                 "start": s.start_balance, "target": s.target_balance, "max_daily_loss": s.max_daily_loss,

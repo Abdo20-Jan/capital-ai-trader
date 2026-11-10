@@ -155,7 +155,7 @@ def create_app(runtime: Runtime | None = None, public: bool = False) -> FastAPI:
             raise HTTPException(502, f"sem candles reais para {epic}: {e}") from e
         out = {"candles": [{"t": str(r.time), "o": r.open, "h": r.high, "l": r.low, "c": r.close, "v": r.volume}
                            for r in df.itertuples()], "volume": [], "volume_source": ""}
-        if rt.alpaca and rt.alpaca.supports(epic) and rt.mode != "simulador":
+        if rt.alpaca and rt.alpaca.supports(epic) and rt.mode != "simulador" and (rt.is_us_share(epic) or epic.endswith("USD") and len(epic) <= 7):
             try:
                 bars = await asyncio.to_thread(rt.alpaca.sip_candles, epic, res, min(count, 500))
                 out["volume"] = [{"t": b.time, "v": b.volume} for b in bars]

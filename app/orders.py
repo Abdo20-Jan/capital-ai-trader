@@ -34,20 +34,33 @@ class OrderManager:
 
     # ------------------------------------------------------------ banca virtual
     def bot_account(self, real: Account) -> Account:
+        """Banca do BOT = banca inicial + resultado realizado dos agentes + resultado em aberto dos agentes.
+
+        Só conta o que os agentes fizeram desde o início da banca. O saldo total da conta, depósitos
+        e posições abertas à mão na Capital.com NÃO entram (antes entravam e geravam "perdas" absurdas).
+        """
         s = self.ctx.settings
-        key = f"baseline:{self.ctx.broker_id}"
+        key = f"bankroll:{self.ctx.broker_id}"
         base = self.ctx.db.get(key)
         if not base or base.get("start") != s.start_balance:
-            base = {"equity": real.equity, "balance": real.balance, "start": s.start_balance}
+            from trader.store import now as db_now          # mesmo formato do campo "closed" dos trades
+            base = {"start": s.start_balance, "since": db_now()}
             self.ctx.db.set(key, base)
-        equity = s.start_balance + (real.equity - base["equity"])
-        balance = s.start_balance + (real.balance - base["balance"])
-        available = min(real.available, equity - (real.equity - real.available))
+        realized = self.ctx.db.rows(
+            "SELECT COALESCE(SUM(pnl), 0) AS p FROM agent_trades WHERE broker=? AND status='CLOSED' "
+            "AND agent != 'manual' AND pnl IS NOT NULL AND closed >= ?", (self.ctx.broker_id, base["since"]))[0]["p"]
+        mine = [p for p in self.live.values() if p.get("agent") != "manual"]
+        upl = sum(p.get("upl") or 0.0 for p in mine)
+        margin = sum(p["size"] * p["level"] * getattr(self._rules.get(p["epic"]), "margin_factor", 0.2) for p in mine)
+        balance = s.start_balance + realized
+        equity = balance + upl
+        available = max(0.0, min(real.available, equity - margin))
         return Account(balance=balance, equity=equity, available=available, currency=real.currency)
 
     def reset_bankroll(self) -> None:
         with self.ctx.db.conn() as c:
-            c.execute("DELETE FROM kv WHERE key=?", (f"baseline:{self.ctx.broker_id}",))
+            c.execute("DELETE FROM kv WHERE key IN (?, ?)", (f"bankroll:{self.ctx.broker_id}", f"baseline:{self.ctx.broker_id}"))
+        self.day_start_equity = None
 
     # ------------------------------------------------------------ travas
     def guard(self, acct: Account) -> tuple[bool, str]:

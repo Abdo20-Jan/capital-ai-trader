@@ -49,16 +49,28 @@ def test_guard_kill_switch_daily_loss_and_bankroll(tmp_path):
     from app.orders import OrderManager
     ctx = FakeCtx(tmp_path)
     om = OrderManager(ctx)
-    v = om.bot_account(Account(balance=10_000, equity=10_000, available=10_000))
+    real = Account(balance=10_000, equity=10_000, available=10_000)
+    v = om.bot_account(real)
     assert v.equity == pytest.approx(60)
     assert om.guard(v)[0]
+    # a conta inteira cai $3.700 por posições que NÃO são do bot: a banca do bot não muda
+    om.live = {"M1": {"agent": "manual", "epic": "AAPL", "direction": "BUY", "size": 10, "level": 200, "upl": -3700}}
+    v = om.bot_account(Account(balance=10_000, equity=6_300, available=6_000))
+    assert v.equity == pytest.approx(60) and om.guard(v)[0]
     om.kill_switch = True
     assert "PAUSA" in om.guard(v)[1]
     om.kill_switch = False
-    v2 = om.bot_account(Account(balance=9_995, equity=9_995, available=9_995))   # −$5 = −8% no dia
-    assert not om.guard(v2)[0]
-    ctx.settings.max_daily_loss = 0                                            # modo aprendizado
+    # trade do agente fechado com −$5 → −8,3% no dia → bloqueia (limite 6%)
+    ctx.db.record_open(deal_id="D1", agent="day", epic="AAPL", direction="BUY", size=1, entry=200, stop=195, target=210,
+                       risk=5, reason="t", broker="t")
+    ctx.db.record_close("D1", -5.0, 195, "stop")
+    v2 = om.bot_account(real)
+    assert v2.equity == pytest.approx(55) and not om.guard(v2)[0]
+    ctx.settings.max_daily_loss = 0                                            # limite desligado
     assert om.guard(v2)[0]
+    # posição aberta do agente entra no patrimônio pelo resultado em aberto
+    om.live = {"D2": {"agent": "swing", "epic": "MSFT", "direction": "BUY", "size": 1, "level": 400, "upl": 2.5}}
+    assert om.bot_account(real).equity == pytest.approx(57.5)
 
 
 # ------------------------------------------------------------------ agentes
@@ -411,3 +423,43 @@ def test_research_loop_yields_when_no_asset_has_data():
     assert not t.is_alive(), "o laço de pesquisa travou o event loop (servidor não responderia)"
     assert out["ticks"] > 10, "o servidor ficou travado pelo laço de pesquisa"
     assert "aguardando" in ra.status
+
+
+# ------------------------------------------------------------------ scanner: todos os mercados, menos cripto
+def _mk(epic, t, pct, status="TRADEABLE", modes=("REGULAR",)):
+    return {"epic": epic, "instrumentType": t, "percentageChange": pct, "marketStatus": status,
+            "marketModes": list(modes), "instrumentName": epic.title()}
+
+
+def test_scanner_excludes_crypto_closed_and_diversifies():
+    from app.universe import select
+    cat = ([_mk(f"S{i}", "SHARES", 10 - i * 0.1) for i in range(60)]
+           + [_mk("BTCUSD", "CRYPTOCURRENCIES", 25), _mk("ETHUSD", "CRYPTOCURRENCIES", 20)]
+           + [_mk(f"C{i}", "COMMODITIES", 3 - i * 0.1) for i in range(10)]
+           + [_mk(f"I{i}", "INDICES", 2 - i * 0.1) for i in range(10)]
+           + [_mk(f"F{i}", "CURRENCIES", 1 - i * 0.05) for i in range(10)]
+           + [_mk("CLOSED", "SHARES", 50, status="CLOSED"), _mk("VIEW", "SHARES", 40, modes=("VIEW_ONLY",))])
+    sel = select(cat, 30, must=["S59"])
+    epics = [m["epic"] for m in sel]
+    assert len(sel) == 30 and "S59" in epics                                   # posição aberta sempre entra
+    assert not {"BTCUSD", "ETHUSD", "CLOSED", "VIEW"} & set(epics)            # sem cripto, fechados ou só-visualização
+    types = {m["instrumentType"] for m in sel}
+    assert {"SHARES", "COMMODITIES", "INDICES", "CURRENCIES"} <= types         # diversificado
+    assert "S0" in epics                                                       # maior variação de ações entra
+
+
+def test_scanner_updates_universe(monkeypatch):
+    from types import SimpleNamespace
+    from app.universe import UniverseScanner
+    monkeypatch.delenv("WATCHLIST", raising=False)
+    got = {}
+
+    async def set_universe(items, names):
+        got["items"], got["names"] = items, names
+    rt = SimpleNamespace(broker=SimpleNamespace(all_markets=lambda: [_mk("AAPL", "SHARES", 2), _mk("GOLD", "COMMODITIES", 1),
+                                                                        _mk("BTCUSD", "CRYPTOCURRENCIES", 9)]),
+                         orders=SimpleNamespace(live={}), set_universe=set_universe)
+    sc = UniverseScanner(rt)
+    asyncio.run(sc.scan())
+    assert [w.epic for w in got["items"]] == ["AAPL", "GOLD"] and got["names"]["GOLD"]["type"] == "COMMODITIES"
+    assert "sem cripto" in sc.status and sc.info()["eligible_by_type"] == {"SHARES": 1, "COMMODITIES": 1}

@@ -21,7 +21,9 @@ GENERAL_FEEDS = [
     ("Investing.com", "https://www.investing.com/rss/news_25.rss"),
     ("Seeking Alpha", "https://seekingalpha.com/market_currents.xml"),
 ]
-GOOGLE_NEWS = "https://news.google.com/rss/search?q={q}+stock+when:1d&hl=en-US&gl=US&ceid=US:en"
+GOOGLE_NEWS = "https://news.google.com/rss/search?q={q}+when:1d&hl=en-US&gl=US&ceid=US:en"
+CRYPTO_NEWS = {"BTCUSD": ("BTC-USD", "bitcoin"), "ETHUSD": ("ETH-USD", "ethereum"), "SOLUSD": ("SOL-USD", "solana"),
+               "XRPUSD": ("XRP-USD", "xrp+crypto"), "LTCUSD": ("LTC-USD", "litecoin")}
 
 # palavras que ligam uma manchete genérica a um ticker
 ALIASES = {
@@ -30,7 +32,7 @@ ALIASES = {
     "AMZN": ["amazon", "aws", "andy jassy"], "META": ["meta platforms", "facebook", "instagram", "zuckerberg"],
     "TSLA": ["tesla", "elon musk"], "AVGO": ["broadcom"], "GOLD": ["gold price", "gold prices", "bullion"],
     "OIL_CRUDE": ["oil price", "crude", "opec", "brent", "wti"], "EURUSD": ["euro", "ecb", "lagarde"],
-    "BTCUSD": ["bitcoin", "crypto"], "US500": ["s&p 500", "wall street", "stocks close", "stock market"],
+    "BTCUSD": ["bitcoin", "btc"], "ETHUSD": ["ethereum", "ether "], "US500": ["s&p 500", "wall street", "stocks close", "stock market"],
     "US100": ["nasdaq"],
 }
 
@@ -57,12 +59,33 @@ class NewsFeed:
         """(nome, url, ticker fixo ou '' para detectar pelo título)."""
         out = []
         for w in self.ctx.settings.watchlist:
-            out.append((f"Yahoo {w.ticker}", YAHOO_RSS.format(ticker=w.ticker), w.ticker))
-            out.append((f"Google News {w.ticker}", GOOGLE_NEWS.format(q=w.ticker), w.ticker))
+            ysym, query = CRYPTO_NEWS.get(w.ticker.upper(), (w.ticker, f"{w.ticker}+stock"))
+            out.append((f"Yahoo {w.ticker}", YAHOO_RSS.format(ticker=ysym), w.ticker))
+            out.append((f"Google News {w.ticker}", GOOGLE_NEWS.format(q=query), w.ticker))
         out += [(n, u, "") for n, u in GENERAL_FEEDS]
+        alp = getattr(self.ctx, "alpaca", None)
+        if alp is not None and alp.has_keys:            # agências de notícias via Alpaca, 3× por rodízio
+            for i in range(3):
+                out.insert(i * max(1, len(out) // 3), ("Alpaca News", "alpaca", ""))
         return out
 
+    def _fetch_alpaca(self) -> list[dict]:
+        tickers = [w.ticker for w in self.ctx.settings.watchlist]
+        items = []
+        for n in self.ctx.alpaca.news(tickers, limit=50):
+            title = (n.get("headline") or "").strip()
+            if not title:
+                continue
+            syms = [s for s in (n.get("symbols") or []) if s in tickers]
+            items.append({"id": news_id(title), "ticker": syms[0] if syms else detect_ticker(title, tickers),
+                          "title": title, "summary": n.get("summary") or "", "url": n.get("url") or "",
+                          "source": f"Alpaca/{n.get('source', '')}",
+                          "time": (n.get("created_at") or "").replace("Z", "+00:00")})
+        return items
+
     def _fetch(self, name: str, url: str, fixed: str) -> list[dict]:
+        if url == "alpaca":
+            return self._fetch_alpaca()
         import feedparser
         r = requests.get(url, headers=UA, timeout=10)
         r.raise_for_status()

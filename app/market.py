@@ -57,6 +57,26 @@ class MarketData:
                 on_closed(closed)
             await asyncio.sleep(1)
 
+    async def run_paper_quotes(self, alpaca, broker, on_closed, every: float = 3.0) -> None:
+        """Modo papel: cotações REAIS (Alpaca) a cada poucos segundos; stops/alvos no preço real."""
+        while True:
+            try:
+                snaps = await asyncio.to_thread(alpaca.snapshots, self.epics)
+                closed = broker.update_quotes(snaps)
+                for epic, q in broker.quotes.items():
+                    self.on_quote(epic, q.bid, q.ask)
+                if closed:
+                    on_closed(closed)
+                missing = [e for e in self.epics if e not in snaps]
+                self.stream_status = (f"dados reais Alpaca ({'SIP' if alpaca.feed == 'sip' else 'IEX'}, a cada {every:g}s)"
+                                      + (f" · sem dados: {', '.join(missing)}" if missing else ""))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.stream_status = f"erro nos dados: {e}"
+                log.warning("cotações: %s", e)
+            await asyncio.sleep(every)
+
     async def run_capital_stream(self) -> None:
         """WebSocket oficial: marketData.subscribe (máx. 40 ativos) + ping a cada 5 min."""
         import websockets

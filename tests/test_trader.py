@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from trader.broker import Account, Candle, MarketRules
+from trader.broker import Account, MarketRules
 from trader.capital import CapitalClient
 from trader.config import Settings, WatchItem, parse_watchlist
 from trader.engine import Engine, aggregate_sentiment

@@ -1,43 +1,33 @@
-"""API do app (FastAPI). Rode com:  python run.py app   → http://localhost:8000"""
+"""API do app (FastAPI).
+
+Local:   python run.py app      → http://localhost:8000 (só no seu computador)
+Nuvem:   python run.py serve    → escuta em 0.0.0.0:$PORT, EXIGE APP_PASSWORD
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from trader.config import ROOT
 from trader.sentiment import TOPIC_LABELS
 
 from .runtime import Runtime
+from .secure import VAULT_KEYS, Auth
 
 STATIC = Path(__file__).parent / "static"
-ENV_PATH = ROOT / ".env"
+OPEN_PATHS = {"/api/health", "/api/login"}
 
 
-def write_env(values: dict[str, str], path: Path = ENV_PATH) -> None:
-    """Atualiza (ou acrescenta) chaves no .env sem mexer no resto do arquivo."""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    done = set()
-    for i, line in enumerate(lines):
-        m = re.match(r"\s*([A-Z0-9_]+)\s*=", line)
-        if m and m.group(1) in values:
-            lines[i] = f"{m.group(1)}={values[m.group(1)]}"
-            done.add(m.group(1))
-    lines += [f"{k}={v}" for k, v in values.items() if k not in done]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)                 # só o seu usuário lê (contém a chave da API)
-    except OSError:
-        pass
-    for k, v in values.items():
-        os.environ[k] = v
+class Login(BaseModel):
+    password: str
 
 
 class Creds(BaseModel):
@@ -65,22 +55,54 @@ class RiskPatch(BaseModel):
     stop_at_target: bool | None = None
 
 
-def create_app(runtime: Runtime | None = None) -> FastAPI:
+class SettingsPatch(BaseModel):
+    values: dict[str, str]
+    restart: bool = True
+
+
+def create_app(runtime: Runtime | None = None, public: bool = False) -> FastAPI:
     rt = runtime or Runtime()
+    auth = Auth(rt.data_dir, public)
 
     @asynccontextmanager
     async def lifespan(app):
-        await rt.start()
+        if not auth.blocked:
+            await rt.start()
         yield
         await rt.stop()
 
     app = FastAPI(title="Capital AI Trader", lifespan=lifespan)
     app.state.rt = rt
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGINS", "").split(",") if o.strip()]
+    if origins:                                          # ex.: o domínio do Vercel
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
+                           allow_headers=["Authorization", "Content-Type"])
 
-    @app.get("/")
-    def index():
-        return FileResponse(STATIC / "index.html")
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path not in OPEN_PATHS and request.method != "OPTIONS":
+            if auth.blocked:
+                return JSONResponse({"detail": "Defina APP_PASSWORD no servidor para liberar o app."}, status_code=503)
+            token = request.headers.get("authorization", "").removeprefix("Bearer ").strip() or request.query_params.get("token")
+            if not auth.verify(token):
+                return JSONResponse({"detail": "login necessário"}, status_code=401)
+        return await call_next(request)
+
+    # ---------------------------------------------------------------- login
+    @app.get("/api/health")
+    def health():
+        return {"ok": True, "auth_required": auth.enabled or public, "blocked": auth.blocked, "mode": rt.mode}
+
+    @app.post("/api/login")
+    def login(body: Login):
+        if not auth.enabled:
+            if public:
+                raise HTTPException(503, "Defina APP_PASSWORD no servidor.")
+            return {"token": "local"}
+        if not auth.check_password(body.password):
+            raise HTTPException(401, "senha incorreta")
+        return {"token": auth.issue()}
 
     # ---------------------------------------------------------------- tempo real
     @app.get("/api/stream")
@@ -97,20 +119,26 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             snap["stats"] = db.agent_stats(a.cfg.key, rt.broker_id)
             snap["open"] = len(rt.orders.positions_of(a.cfg.key)) if rt.orders else 0
             agents.append(snap)
-        news = db.rows("SELECT * FROM news ORDER BY ingested DESC LIMIT 80")
-        sentiment = [{"epic": e, "ticker": rt.ticker_for(e), "score": rt.sentiment(e)} for e in rt.epics]
+        research = {}
+        if rt.research:
+            for e in rt.epics:
+                b = rt.research.briefs.get(e)
+                if b:
+                    research[e] = {**b, "social": rt.research.social.get(e)}
         return {
             "status": rt.status(),
             "account": rt.last_account,
             "agents": agents,
             "quotes": rt.market.quotes if rt.market else {},
+            "volumes": rt.volumes,
+            "research": research,
             "positions": list(rt.orders.live.values()) if rt.orders else [],
-            "news": news,
-            "sentiment": sentiment,
+            "news": db.rows("SELECT * FROM news ORDER BY ingested DESC LIMIT 120"),
+            "sentiment": [{"epic": e, "ticker": rt.ticker_for(e), "score": rt.sentiment(e)} for e in rt.epics],
             "topics": TOPIC_LABELS,
             "decisions": db.rows("SELECT * FROM decisions ORDER BY id DESC LIMIT 120"),
-            "trades": db.rows("SELECT * FROM agent_trades WHERE broker=? AND status='CLOSED' "
-                              "ORDER BY closed DESC LIMIT 100", (rt.broker_id,)),
+            "trades": db.rows("SELECT * FROM agent_trades WHERE broker=? AND status='CLOSED' ORDER BY closed DESC LIMIT 100",
+                              (rt.broker_id,)),
             "equity": db.rows("SELECT time, equity, real_equity FROM (SELECT rowid, * FROM app_equity WHERE broker=? "
                               "ORDER BY rowid DESC LIMIT 720) ORDER BY rowid", (rt.broker_id,)),
             "events": db.rows("SELECT * FROM events ORDER BY id DESC LIMIT 80"),
@@ -121,8 +149,35 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     async def candles(epic: str, res: str = "MINUTE_15", count: int = 150):
         if epic not in rt.epics:
             raise HTTPException(404, "ativo fora da lista")
-        df = await rt.market.candles(epic, res, min(count, 500))
-        return [{"t": str(r.time), "o": r.open, "h": r.high, "l": r.low, "c": r.close} for r in df.itertuples()]
+        try:
+            df = await rt.market.candles(epic, res, min(count, 500))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"sem candles reais para {epic}: {e}") from e
+        out = {"candles": [{"t": str(r.time), "o": r.open, "h": r.high, "l": r.low, "c": r.close, "v": r.volume}
+                           for r in df.itertuples()], "volume": [], "volume_source": ""}
+        if rt.alpaca and rt.alpaca.supports(epic) and rt.mode != "simulador":
+            try:
+                bars = await asyncio.to_thread(rt.alpaca.sip_candles, epic, res, min(count, 500))
+                out["volume"] = [{"t": b.time, "v": b.volume} for b in bars]
+                out["volume_source"] = ("cripto: só o volume da própria Alpaca, não o volume global" if epic.endswith("USD") and len(epic) <= 7
+                                        else "consolidado SIP" + ("" if rt.alpaca.realtime_volume else " · atraso 15 min"))
+            except Exception as e:  # noqa: BLE001
+                out["volume_source"] = f"volume indisponível: {e}"
+        return out
+
+    @app.get("/api/research/{epic}")
+    def research_history(epic: str):
+        rows = rt.db.rows("SELECT id, time, provider, brief FROM research WHERE epic=? ORDER BY id DESC LIMIT 10", (epic,))
+        last = rt.db.rows("SELECT dossier FROM research WHERE epic=? ORDER BY id DESC LIMIT 1", (epic,))
+        return {"history": [{**r, "brief": json.loads(r["brief"])} for r in rows],
+                "dossier": json.loads(last[0]["dossier"]) if last else None}
+
+    @app.post("/api/research/{epic}/run")
+    async def research_now(epic: str):
+        if epic not in rt.epics or not rt.research:
+            raise HTTPException(404, "ativo fora da lista")
+        brief = await rt.research.research(epic)
+        return {"ok": True, "brief": brief}
 
     # ---------------------------------------------------------------- controles
     @app.post("/api/agents/{key}")
@@ -130,9 +185,10 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         a = next((x for x in rt.agents if x.cfg.key == key), None)
         if not a:
             raise HTTPException(404, "agente não encontrado")
-        a.update({k: v for k, v in patch.model_dump().items() if v is not None})
+        changes = {k: v for k, v in patch.model_dump().items() if v is not None}
+        a.update(changes)
         rt.save_agent_configs()
-        rt.event(f"{a.cfg.name}: configuração alterada ({', '.join(k for k, v in patch.model_dump().items() if v is not None)})")
+        rt.event(f"{a.cfg.name}: configuração alterada ({', '.join(changes)})")
         return a.snapshot()
 
     @app.post("/api/kill")
@@ -145,8 +201,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
 
     @app.post("/api/close/{deal_id}")
     async def close(deal_id: str):
-        ok = await rt.orders.close(deal_id, "fechada manualmente no painel")
-        return {"ok": ok}
+        return {"ok": await rt.orders.close(deal_id, "fechada manualmente no painel")}
 
     @app.post("/api/close-all")
     async def close_all():
@@ -155,29 +210,28 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         return {"closed": sum(results), "total": len(ids)}
 
     @app.post("/api/risk")
-    async def risk(patch: RiskPatch):
+    def risk(patch: RiskPatch):
+        s = rt.settings
         vals = {}
         if patch.start_balance is not None:
-            vals["START_BALANCE"] = str(patch.start_balance)
+            s.start_balance = vals["START_BALANCE"] = float(patch.start_balance)
         if patch.target_balance is not None:
-            vals["TARGET_BALANCE"] = str(patch.target_balance)
+            s.target_balance = vals["TARGET_BALANCE"] = float(patch.target_balance)
         if patch.max_daily_loss is not None:
-            vals["MAX_DAILY_LOSS"] = str(patch.max_daily_loss)
+            s.max_daily_loss = vals["MAX_DAILY_LOSS"] = float(patch.max_daily_loss)
         if patch.stop_at_target is not None:
+            s.stop_at_target = bool(patch.stop_at_target)
             vals["STOP_AT_TARGET"] = "1" if patch.stop_at_target else "0"
         if vals:
-            write_env(vals)
-            s = rt.settings
-            s.start_balance = float(os.environ.get("START_BALANCE", s.start_balance))
-            s.target_balance = float(os.environ.get("TARGET_BALANCE", s.target_balance))
-            s.max_daily_loss = float(os.environ.get("MAX_DAILY_LOSS", s.max_daily_loss))
-            s.stop_at_target = os.environ.get("STOP_AT_TARGET", "1") not in ("0", "false")
+            rt.vault.save({k: str(v) for k, v in vals.items()})
             rt.event("Regras de risco atualizadas: " + ", ".join(f"{k}={v}" for k, v in vals.items()), "warn")
         return rt.status()
 
     @app.post("/api/bankroll/reset")
     def reset_bankroll():
         rt.orders.reset_bankroll()
+        if rt.mode == "papel":
+            rt.db.set("paper_cash", rt.settings.start_balance)
         rt.event(f"Banca virtual reiniciada em ${rt.settings.start_balance:.2f}", "info")
         return {"ok": True}
 
@@ -186,27 +240,34 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         asyncio.create_task(rt._train_model(force=True))
         return {"ok": True}
 
-    # ---------------------------------------------------------------- conexão Capital.com
-    @app.get("/api/connection")
-    def connection():
-        s = rt.settings
-        key = s.capital_api_key
-        return {"mode": rt.mode, "broker_id": rt.broker_id, "error": rt.connection_error,
-                "configured": bool(key and s.capital_identifier and s.capital_password),
-                "api_key_hint": (key[:3] + "…" + key[-3:]) if len(key) > 8 else ("definida" if key else ""),
-                "identifier": s.capital_identifier, "account_id": s.capital_account_id,
-                "anthropic": bool(s.anthropic_api_key), "stream": rt.market.stream_status if rt.market else ""}
+    # ---------------------------------------------------------------- configurações
+    @app.get("/api/settings")
+    def get_settings_view():
+        return {"values": rt.vault.public_view(), "mode": rt.mode, "broker_id": rt.broker_id,
+                "error": rt.connection_error, "llm": rt.router.status() if rt.router else {},
+                "stream": rt.market.stream_status if rt.market else "", "public": public}
 
-    def _client(c: Creds):
+    @app.post("/api/settings")
+    async def save_settings(body: SettingsPatch):
+        vals = {k: v.strip() for k, v in body.values.items() if k in VAULT_KEYS and v is not None and v.strip() != ""}
+        if not vals:
+            raise HTTPException(400, "nada para salvar")
+        rt.vault.save(vals)
+        rt.event("Configurações salvas: " + ", ".join(sorted(vals)), "info")
+        if body.restart:
+            await rt.restart()
+        return {"mode": rt.mode, "error": rt.connection_error, "llm": rt.router.status() if rt.router else {}}
+
+    def _capital(c: Creds):
         from trader.capital import CapitalClient
         s = rt.settings
         return CapitalClient(c.api_key or s.capital_api_key, c.identifier or s.capital_identifier,
                              c.password or s.capital_password, account_id=c.account_id or s.capital_account_id)
 
-    @app.post("/api/connection/test")
-    async def test_connection(c: Creds):
+    @app.post("/api/settings/test-capital")
+    async def test_capital(c: Creds):
         def work():
-            cl = _client(c)
+            cl = _capital(c)
             cl.login()
             accts = cl.accounts()
             try:
@@ -222,25 +283,44 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
 
-    @app.post("/api/connection/save")
-    async def save_connection(c: Creds):
-        vals = {"BROKER": "capital_demo"}
-        if c.api_key:
-            vals["CAPITAL_API_KEY"] = c.api_key.strip()
-        if c.identifier:
-            vals["CAPITAL_IDENTIFIER"] = c.identifier.strip()
-        if c.password:
-            vals["CAPITAL_PASSWORD"] = c.password
-        vals["CAPITAL_ACCOUNT_ID"] = c.account_id.strip()
-        write_env(vals)
-        await rt.restart()
-        return {"mode": rt.mode, "error": rt.connection_error}
+    @app.post("/api/settings/test-alpaca")
+    async def test_alpaca(body: SettingsPatch):
+        from .data.alpaca import AlpacaData, is_crypto
+        v = body.values
+        a = AlpacaData(v.get("ALPACA_KEY_ID") or os.environ.get("ALPACA_KEY_ID", ""),
+                       v.get("ALPACA_SECRET_KEY") or os.environ.get("ALPACA_SECRET_KEY", ""),
+                       v.get("ALPACA_FEED") or os.environ.get("ALPACA_FEED", "iex"))
+        stocks = [e for e in rt.epics if not is_crypto(e)][:3] or ["AAPL"]
+        try:
+            snap = await asyncio.to_thread(a.snapshots, stocks)
+            vol = await asyncio.to_thread(a.consolidated_volume, stocks)
+            return {"ok": True, "quotes": {k: {"last": s["last"], "bid": s["bid"], "ask": s["ask"]} for k, s in snap.items()},
+                    "volume": vol}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
 
-    @app.post("/api/connection/simulator")
-    async def use_simulator():
-        write_env({"BROKER": "paper"})
-        await rt.restart()
-        return {"mode": rt.mode}
+    @app.post("/api/settings/test-llm")
+    async def test_llm(body: SettingsPatch):
+        from .llm import LLMRouter
+        saved = {k: os.environ.get(k) for k in body.values}
+        for k, val in body.values.items():
+            if k in VAULT_KEYS and val:
+                os.environ[k] = val
+        r = LLMRouter()
+        for k, old in saved.items():                          # teste não altera a configuração ativa
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+        ok = await asyncio.to_thread(r.health, True)
+        schema = {"type": "object", "properties": {"sentiment": {"type": "number"}}, "required": ["sentiment"],
+                  "additionalProperties": False}
+        t0 = asyncio.get_running_loop().time()
+        out, provider = await asyncio.to_thread(
+            r.json, "Return the sentiment (-1..1) of the headline for the stock.",
+            "Headline: Apple beats earnings estimates and raises guidance", schema, 200)
+        return {"local_ok": ok, "provider": provider, "result": out, "seconds": round(asyncio.get_running_loop().time() - t0, 1),
+                "error": r.last_error, "active": r.active()}
 
     @app.post("/api/connection/test-order")
     async def test_order(epic: str):
@@ -267,4 +347,6 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         rt.event(f"Ordem de teste em {epic}: {'OK' if out.get('ok') else 'FALHOU'} {out}", "trade" if out.get("ok") else "error")
         return out
 
+    # ---------------------------------------------------------------- frontend (mesmo servidor)
+    app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
     return app

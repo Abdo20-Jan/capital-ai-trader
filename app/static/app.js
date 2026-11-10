@@ -1,7 +1,7 @@
 "use strict";
 /* ============================================================ estado e utilitários */
 const S = { status: {}, account: {}, agents: [], quotes: {}, positions: [], news: [], decisions: [], trades: [],
-  equity: [], events: [], sentiment: [], model: null, newsTimes: [], prevQuotes: {} };
+  equity: [], events: [], sentiment: [], model: null, newsTimes: [], prevQuotes: {}, volumes: {}, research: {} };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (v) => (v == null || isNaN(v) ? "—" : (v < 0 ? "-$" : "$") + Math.abs(Number(v)).toFixed(2));
@@ -15,11 +15,15 @@ const agColor = (k) => AG_COLORS[k] || "var(--a-manual)";
 const agName = (k) => (S.agents.find((a) => a.config.key === k)?.config.name) || (k === "manual" ? "Manual" : k || "?");
 const sentColor = (v) => (v > 0.05 ? "var(--up)" : v < -0.05 ? "var(--down)" : "var(--mid)");
 const DIR = { BUY: "COMPRA", SELL: "VENDA" };
+const API_BASE = (window.API_BASE || "").replace(/\/$/, "");
+let TOKEN = (() => { try { return localStorage.getItem("token") || ""; } catch (e) { return ""; } })();
 const api = async (path, opts = {}) => {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const r = await fetch(API_BASE + path, { ...opts, headers: { "Content-Type": "application/json", ...(TOKEN ? { Authorization: "Bearer " + TOKEN } : {}), ...(opts.headers || {}) } });
+  if (r.status === 401) { showLogin(); throw new Error("login necessário"); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
 };
+const post = (path, body) => api(path, { method: "POST", body: body == null ? undefined : JSON.stringify(body) });
 const throttle = (fn, ms) => { let t = 0, timer = null; return (...a) => { const now = Date.now(); clearTimeout(timer);
   if (now - t >= ms) { t = now; fn(...a); } else timer = setTimeout(() => { t = Date.now(); fn(...a); }, ms - (now - t)); }; };
 const tip = $("tip");
@@ -41,26 +45,29 @@ addEventListener("hashchange", route);
 function renderTab() {
   if (TAB === "painel") { renderKpis(); renderEquity(); renderAgentMini(); renderNewsLive(); renderDecLive(); renderPosMini(); }
   if (TAB === "agentes") { renderAgents(); renderRiskForm(); }
+  if (TAB === "pesquisa") { renderResearch(); }
   if (TAB === "noticias") { renderSentBars(); renderSources(); renderNewsAll(); }
   if (TAB === "ordens") { renderPosFull(); renderDecTable(); renderTrades(); renderEvents(); }
   if (TAB === "mercados") { renderQuotes(); loadChart(); }
-  if (TAB === "conexao") { loadConnection(); renderSys(); }
+  if (TAB === "config") { loadSettings(); renderSys(); }
 }
 
 /* ============================================================ topo */
 function renderHeader() {
   const st = S.status;
-  const sim = st.mode !== "capital";
-  $("mode-pill").innerHTML = sim ? `modo <b>SIMULADOR</b>${st.speed > 1 ? ` · ${st.speed}× velocidade` : ""}` : `<b>Capital.com DEMO</b> · ${esc((st.broker_id || "").replace("capital:", "conta "))}`;
+  const label = { papel: `<b>DADOS REAIS</b> · ordens em papel`, capital: `<b>Capital.com DEMO</b> · ${esc((st.broker_id || "").replace("capital:", "conta "))}`,
+    simulador: `<b>SIMULADOR</b> (testes)` }[st.mode] || "…";
+  $("mode-pill").innerHTML = label;
   const kb = $("kill-btn");
   kb.textContent = st.kill_switch ? "Retomar agentes" : "Pausar tudo";
   kb.classList.toggle("on", !!st.kill_switch);
-  const b = $("banner");
   const msgs = [];
-  if (sim) msgs.push(`Você está no <b>simulador</b> (preços e notícias sintéticos). Para operar na sua conta demo, vá em <a href="#conexao">Conexão</a>.`);
+  if (st.mode === "simulador") msgs.push(`Modo <b>simulador</b> ativo (dados sintéticos, só para testes).`);
+  if (st.mode === "papel" && st.alpaca && !st.alpaca.keys) msgs.push(`Sem chaves da Alpaca: ações não têm preço nem volume reais. Configure em <a href="#config">Configurações</a> (cripto já funciona sem chave).`);
   if (st.connection_error) msgs.push(`Falha ao conectar na Capital.com: ${esc(st.connection_error)}`);
+  if (st.alpaca && st.alpaca.error) msgs.push(`Alpaca: ${esc(st.alpaca.error)}`);
   if (S.account.guard && S.account.guard !== "ok") msgs.push(`Novas entradas bloqueadas: ${esc(S.account.guard)}`);
-  b.hidden = !msgs.length; b.innerHTML = msgs.join("<br>");
+  const b = $("banner"); b.hidden = !msgs.length; b.innerHTML = msgs.join("<br>");
 }
 let lastMsg = Date.now();
 setInterval(() => $("live-pill").classList.toggle("live", Date.now() - lastMsg < 10000), 1000);
@@ -199,7 +206,7 @@ function renderAgents() {
 }
 document.addEventListener("change", async (e) => {
   const k = e.target.dataset?.en; if (!k) return;
-  await api(`/api/agents/${k}`, { method: "POST", body: JSON.stringify({ enabled: e.target.checked }) }); load();
+  await post(`/api/agents/${k}`, { enabled: e.target.checked }); load();
 });
 document.addEventListener("submit", async (e) => {
   const k = e.target.dataset?.agent; if (!k) return; e.preventDefault();
@@ -261,12 +268,14 @@ function renderEvents() { $("events").innerHTML = S.events.slice(0, 80).map((e) 
 
 /* ============================================================ mercados */
 let chartEpic = null;
+const fmtVol = (v) => v == null ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + " bi" : v >= 1e6 ? (v / 1e6).toFixed(2) + " mi" : v >= 1e3 ? (v / 1e3).toFixed(1) + " mil" : Number(v).toFixed(v < 10 ? 4 : 0);
 function renderQuotes() {
   const epics = S.status.epics || Object.keys(S.quotes);
   if (!chartEpic) chartEpic = epics[0];
-  $("quotes").innerHTML = epics.map((e) => { const q = S.quotes[e] || {}; const ch = q.open ? (q.mid / q.open - 1) * 100 : 0;
+  $("quotes").innerHTML = epics.map((e) => { const q = S.quotes[e] || {}; const v = S.volumes[e]; const ch = q.open ? (q.mid / q.open - 1) * 100 : 0;
     return `<div class="q ${e === chartEpic ? "sel" : ""}" data-q="${esc(e)}"><div class="e"><span>${esc(e)}</span><span class="chg ${updn(ch)} small">${signed(ch, 2)}%</span></div>
-      <div class="p">${px(q.mid)}</div><div class="ba">bid ${px(q.bid)} · ask ${px(q.ask)}</div></div>`; }).join("");
+      <div class="p">${px(q.mid)}</div><div class="ba">bid ${px(q.bid)} · ask ${px(q.ask)}</div>
+      <div class="vol" title="${v ? esc(`${v.source} · ${v.delay}`) : "sem volume consolidado"}">${v ? `vol. ${fmtVol(v.day_volume)} · RVOL ${v.rvol ?? "—"}${v.delayed ? " · 15′" : ""}` : "vol. —"}</div></div>`; }).join("");
 }
 const renderQuotesT = throttle(() => TAB === "mercados" && renderQuotes(), 1000);
 $("quotes").addEventListener("click", (e) => { const q = e.target.closest("[data-q]"); if (!q) return; chartEpic = q.dataset.q; renderQuotes(); loadChart(); });
@@ -274,12 +283,14 @@ $("chart-res").onchange = () => loadChart();
 async function loadChart() {
   if (TAB !== "mercados" || !chartEpic) return;
   const res = $("chart-res").value;
-  try { candles(await api(`/api/candles?epic=${encodeURIComponent(chartEpic)}&res=${res}&count=120`)); } catch (e) { $("px-chart").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  try { const d = await api(`/api/candles?epic=${encodeURIComponent(chartEpic)}&res=${res}&count=120`); candles(d.candles); volumes(d.candles, d.volume, d.volume_source); }
+  catch (e) { $("px-chart").innerHTML = `<div class="empty">${esc(e.message)}</div>`; $("vol-chart").innerHTML = ""; }
   $("chart-title").textContent = `${chartEpic} · ${$("chart-res").selectedOptions[0].text}`;
 }
-setInterval(loadChart, 4000);
+setInterval(loadChart, 5000);
+const CM = { l: 56, r: 12 };
 function candles(data) {
-  const el = $("px-chart"), W = el.clientWidth || 800, H = el.clientHeight || 380, m = { l: 56, r: 12, t: 10, b: 22 };
+  const el = $("px-chart"), W = el.clientWidth || 800, H = el.clientHeight || 380, m = { ...CM, t: 10, b: 22 };
   if (!data.length) { el.innerHTML = `<div class="empty">sem dados</div>`; return; }
   const pos = S.positions.filter((p) => p.epic === chartEpic);
   const levels = pos.flatMap((p) => [p.level, p.stop, p.target]).filter((v) => v != null);
@@ -287,11 +298,11 @@ function candles(data) {
   const n = data.length, bw = (W - m.l - m.r) / n, x = (i) => m.l + bw * (i + 0.5), y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
   const ticks = [0, 1, 2, 3, 4].map((i) => lo + pad + (hi - lo - 2 * pad) * i / 4);
   const body = Math.max(1, Math.min(10, bw - 2));
+  const fmtT = (t) => new Date(t).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Candles de ${esc(chartEpic)}">
     ${ticks.map((t) => `<line class="gridl" x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/>`).join("")}
     <g class="axis">${ticks.map((t) => `<text x="${m.l - 6}" y="${y(t) + 3}" text-anchor="end">${px(t)}</text>`).join("")}
-      <text x="${m.l}" y="${H - 6}">${new Date(data[0].t).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</text>
-      <text x="${W - m.r}" y="${H - 6}" text-anchor="end">${new Date(data[n - 1].t).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</text></g>
+      <text x="${m.l}" y="${H - 6}">${fmtT(data[0].t)}</text><text x="${W - m.r}" y="${H - 6}" text-anchor="end">${fmtT(data[n - 1].t)}</text></g>
     ${data.map((d, i) => { const up = d.c >= d.o, c = up ? "var(--up)" : "var(--down)";
       return `<g data-i="${i}"><line x1="${x(i)}" x2="${x(i)}" y1="${y(d.h)}" y2="${y(d.l)}" stroke="${c}" stroke-width="1"/>
         <rect x="${x(i) - body / 2}" y="${Math.min(y(d.o), y(d.c))}" width="${body}" height="${Math.max(1, Math.abs(y(d.o) - y(d.c)))}" fill="${c}" rx="1"/>
@@ -304,52 +315,138 @@ function candles(data) {
     g.onmousemove = (e) => showTip(e, `${new Date(d.t).toLocaleString("pt-BR")}<br>abertura ${px(d.o)} · máx ${px(d.h)}<br>mín ${px(d.l)} · fech. <b>${px(d.c)}</b>`);
     g.onmouseleave = hideTip; });
 }
-
-/* ============================================================ conexão */
-async function loadConnection() {
-  try {
-    const c = await api("/api/connection"), box = $("conn-status");
-    if (c.mode === "capital") { box.className = "status-box ok"; box.innerHTML = `Conectado à <b>Capital.com DEMO</b> (${esc(c.broker_id)}). Preços: ${esc(c.stream)}.`; }
-    else if (c.error) { box.className = "status-box err"; box.innerHTML = `Não conectado: ${esc(c.error)}`; }
-    else { box.className = "status-box sim"; box.innerHTML = c.configured ? "Credenciais salvas, mas o app está no simulador." : "Ainda não conectado — o app está no <b>simulador</b>."; }
-    const f = $("conn-form"); if (!f.identifier.value) f.identifier.value = c.identifier || "";
-    f.api_key.placeholder = c.api_key_hint ? `atual: ${c.api_key_hint} (vazio = manter)` : "cole a chave da API";
-    if (c.account_id && ![...f.account_id.options].some((o) => o.value === c.account_id)) f.account_id.add(new Option(`conta ${c.account_id}`, c.account_id));
-    f.account_id.value = c.account_id || "";
-    $("to-epic").innerHTML = (S.status.epics || []).map((e) => `<option>${esc(e)}</option>`).join("");
-  } catch (e) {}
+function volumes(data, vols, source) {
+  const el = $("vol-chart"), W = el.clientWidth || 800, H = el.clientHeight || 110, m = { ...CM, t: 6, b: 16 };
+  $("vol-src").textContent = source ? `volume: ${source}` : "volume: sem fonte consolidada (configure a Alpaca)";
+  const byT = new Map((vols || []).map((v) => [new Date(v.t).getTime(), v.v]));
+  const vs = data.map((d) => byT.get(new Date(d.t).getTime()) ?? null);
+  const max = Math.max(0, ...vs.filter((v) => v != null));
+  if (!max) { el.innerHTML = `<div class="empty small">sem volume para este período${source && source.includes("15 min") ? " (o plano grátis mostra até 15 min atrás)" : ""}</div>`; return; }
+  const n = data.length, bw = (W - m.l - m.r) / n, bwid = Math.max(1, Math.min(10, bw - 2));
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Volume">
+    <g class="axis"><text x="${m.l - 6}" y="${m.t + 8}" text-anchor="end">${fmtVol(max)}</text></g>
+    ${vs.map((v, i) => v == null ? "" : `<rect data-v="${i}" x="${m.l + bw * (i + 0.5) - bwid / 2}" y="${m.t + (1 - v / max) * (H - m.t - m.b)}" width="${bwid}"
+      height="${Math.max(1, (v / max) * (H - m.t - m.b))}" fill="var(--text-muted)" opacity=".75" rx="1"/>`).join("")}</svg>`;
+  el.querySelectorAll("rect[data-v]").forEach((r) => { const i = +r.dataset.v;
+    r.onmousemove = (e) => showTip(e, `${new Date(data[i].t).toLocaleString("pt-BR")}<br>volume <b>${fmtVol(vs[i])}</b>`); r.onmouseleave = hideTip; });
 }
-function credsBody() { const f = $("conn-form"); return JSON.stringify({ api_key: f.api_key.value.trim(), identifier: f.identifier.value.trim(), password: f.password.value, account_id: f.account_id.value }); }
+
+/* ============================================================ pesquisa */
+function renderResearch() {
+  const st = S.status.research || {};
+  $("research-status").textContent = st.status ? `Status: ${st.status} · nova tese a cada ~${st.interval_min} min por ciclo · SEC: ${st.sec} · StockTwits: ${st.stocktwits}` : "";
+  const epics = S.status.epics || [];
+  $("research").innerHTML = epics.map((e) => { const r = S.research[e]; const v = S.volumes[e];
+    const crypto = /^(BTC|ETH|SOL|LTC|XRP)USD$/.test(e);
+    if (!r) return `<div class="rcard"><header><h3>${esc(e)}</h3><button class="btn ghost sm" data-run="${esc(e)}" type="button">pesquisar agora</button></header>
+      <p class="muted">${S.status.mode === "papel" && !crypto && !(S.status.alpaca || {}).keys ? "Sem dados reais deste ativo: configure as chaves da Alpaca em Configurações." : "Aguardando a primeira pesquisa…"}</p></div>`;
+    const so = r.social;
+    return `<div class="rcard"><header><h3>${esc(e)}</h3><span class="bias"><span class="pos ${updn(r.bias)}">${signed(r.bias)}</span></span></header>
+      <div class="facts"><span>confiança ${pct(r.confidence)}</span><span>horizonte ${esc(r.horizon)}</span><span>${esc(r.provider === "local" ? "IA local" : r.provider === "claude" ? "Claude" : "regras")}</span>
+        <span>${hhmm(r.time)}</span>${v ? `<span>RVOL ${v.rvol ?? "—"}</span>` : ""}${so && so.bull_ratio != null ? `<span>StockTwits ${Math.round(so.bull_ratio * 100)}% otimista</span>` : ""}</div>
+      <p>${esc(r.summary)}</p>
+      ${r.drivers?.length ? `<div class="lbl">motivos</div><ul>${r.drivers.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+      ${r.risks?.length ? `<div class="lbl">riscos</div><ul>${r.risks.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+      ${r.catalysts?.length ? `<div class="lbl">catalisadores</div><ul>${r.catalysts.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+      <div class="row"><button class="btn ghost sm" data-run="${esc(e)}" type="button">pesquisar agora</button><button class="btn ghost sm" data-dossier="${esc(e)}" type="button">ver dossiê e histórico</button></div></div>`; }).join("");
+}
+document.addEventListener("click", async (ev) => {
+  const run = ev.target.dataset?.run, dos = ev.target.dataset?.dossier;
+  if (run) { ev.target.disabled = true; ev.target.textContent = "pesquisando…";
+    try { await post(`/api/research/${encodeURIComponent(run)}/run`); } catch (e) { alert(e.message); } load(); }
+  if (dos) { const d = await api(`/api/research/${encodeURIComponent(dos)}`); $("dossier-card").hidden = false; $("dossier-title").textContent = `Dossiê · ${dos}`;
+    $("dossier").innerHTML = `<div class="dossier"><div class="lbl">histórico de teses</div><table><tr><th>hora</th><th>fonte</th><th class="num">viés</th><th class="num">conf.</th><th>resumo</th></tr>
+      ${d.history.map((h) => `<tr><td>${hhmm(h.time)}</td><td>${esc(h.provider)}</td><td class="num">${signed(h.brief.bias)}</td><td class="num">${pct(h.brief.confidence)}</td><td class="why">${esc(h.brief.summary)}</td></tr>`).join("")}</table>
+      <div class="lbl" style="margin-top:10px">dados enviados à IA (último dossiê)</div><pre>${esc(JSON.stringify(d.dossier, null, 2))}</pre></div>`;
+    $("dossier-card").scrollIntoView({ behavior: "smooth" }); }
+});
+$("dossier-close").onclick = () => { $("dossier-card").hidden = true; };
+
+/* ============================================================ configurações */
+let SET = null;
+async function loadSettings() {
+  try { SET = await api("/api/settings"); } catch (e) { return; }
+  const box = $("conn-status"), st = SET;
+  const modeTxt = { papel: "Operando em <b>PAPEL com dados reais</b>: preços, volume e notícias reais; saldo e ordens virtuais.",
+    capital: `Conectado à <b>Capital.com DEMO</b> (${esc(st.broker_id)}): ordens reais na conta demo. Preços: ${esc(st.stream)}.`,
+    simulador: "Modo simulador (testes)." }[st.mode] || "";
+  box.className = "status-box " + (st.error ? "err" : "ok");
+  box.innerHTML = modeTxt + (st.error ? `<br>Erro na Capital.com: ${esc(st.error)}` : "") + `<br>IA ativa: <b>${esc(st.llm.active || "—")}</b>${st.llm.last_error ? ` · ${esc(st.llm.last_error)}` : ""}`;
+  document.querySelectorAll("[data-settings] [name]").forEach((inp) => {
+    const v = st.values[inp.name]; if (!v) return;
+    const lab = inp.closest("label"); let s = lab.querySelector(".src"); if (!s) { s = document.createElement("span"); s.className = "src"; lab.firstChild.after(s); }
+    s.textContent = v.source === "servidor" ? "· definida no servidor" : v.set ? "· salva" : "";
+    if (inp.type === "password") { inp.placeholder = v.set ? `${v.hint} (vazio = manter)` : ""; }
+    else if (document.activeElement !== inp && v.value && !inp.dataset.touched) inp.value = v.value;
+    if (inp.tagName === "SELECT" && inp.selectedIndex < 0) inp.selectedIndex = 0;
+    inp.disabled = v.source === "servidor";
+  });
+  const f = $("conn-form"), cv = st.values;
+  if (!f.identifier.value && cv.CAPITAL_IDENTIFIER) f.identifier.value = cv.CAPITAL_IDENTIFIER.value || "";
+  f.api_key.placeholder = cv.CAPITAL_API_KEY?.set ? `${cv.CAPITAL_API_KEY.hint} (vazio = manter)` : "cole a chave da API";
+  f.password.placeholder = cv.CAPITAL_PASSWORD?.set ? "••• (vazio = manter)" : "";
+  const acc = cv.CAPITAL_ACCOUNT_ID?.value; if (acc && ![...f.account_id.options].some((o) => o.value === acc)) f.account_id.add(new Option(`conta ${acc}`, acc));
+  if (acc) f.account_id.value = acc;
+  $("to-epic").innerHTML = (S.status.epics || []).map((e) => `<option>${esc(e)}</option>`).join("");
+}
+document.addEventListener("input", (e) => { if (e.target.closest("[data-settings]")) e.target.dataset.touched = "1"; });
+function formValues(f) { const v = {}; [...f.elements].forEach((i) => { if (i.name && !i.disabled && i.value !== "") v[i.name] = i.value; }); return v; }
+document.addEventListener("submit", async (e) => {
+  const f = e.target; if (!f.matches("[data-settings]")) return; e.preventDefault();
+  const b = e.submitter; if (b) { b.disabled = true; b.textContent = "salvando…"; }
+  try { await post("/api/settings", { values: formValues(f) }); f.querySelectorAll("[data-touched]").forEach((i) => delete i.dataset.touched);
+    f.querySelectorAll("input[type=password]").forEach((i) => (i.value = "")); }
+  catch (err) { alert(err.message); }
+  if (b) { b.disabled = false; b.textContent = "Salvar"; } load(); loadSettings();
+});
+document.addEventListener("click", async (e) => {
+  const t = e.target.dataset?.test; if (!t) return;
+  const f = e.target.closest("form"), out = document.querySelector(`[data-result="${t}"]`);
+  e.target.disabled = true; out.textContent = "testando…";
+  try {
+    const r = await post(`/api/settings/test-${t}`, { values: formValues(f), restart: false });
+    if (t === "alpaca") out.innerHTML = r.ok ? `<div class="status-box ok">Dados reais recebidos: ${Object.entries(r.quotes).map(([k, q]) => `${esc(k)} ${px(q.last)}`).join(" · ")}<br>Volume consolidado: ${Object.entries(r.volume).map(([k, v]) => `${esc(k)} ${fmtVol(v.day_volume)}${v.delayed ? " (15 min)" : ""}`).join(" · ") || "—"}</div>` : `<div class="status-box err">${esc(r.error)}</div>`;
+    if (t === "llm") out.innerHTML = `<div class="status-box ${r.provider === "dicionario" ? "err" : "ok"}">Respondeu: <b>${esc(r.provider === "local" ? "IA local" : r.provider)}</b> em ${r.seconds}s · resultado ${esc(JSON.stringify(r.result))}${r.error ? `<br>${esc(r.error)}` : ""}</div>`;
+  } catch (err) { out.innerHTML = `<div class="status-box err">${esc(err.message)}</div>`; }
+  e.target.disabled = false;
+});
+function credsBody() { const f = $("conn-form"); return { api_key: f.api_key.value.trim(), identifier: f.identifier.value.trim(), password: f.password.value, account_id: f.account_id.value }; }
 $("conn-test").onclick = async (e) => {
   e.target.disabled = true; $("conn-result").textContent = "Testando…";
-  const r = await api("/api/connection/test", { method: "POST", body: credsBody() }).catch((x) => ({ ok: false, error: x.message }));
+  const r = await post("/api/settings/test-capital", credsBody()).catch((x) => ({ ok: false, error: x.message }));
   e.target.disabled = false;
-  if (!r.ok) { $("conn-result").innerHTML = `<div class="status-box err">${esc(r.error)}<br><span class="muted">Confira: e-mail de login, a chave e a senha da CHAVE (não a da conta). A chave precisa estar ativa.</span></div>`; return; }
+  if (!r.ok) { $("conn-result").innerHTML = `<div class="status-box err">${esc(r.error)}<br><span class="muted">Confira: e-mail de login, a chave e a senha da CHAVE (não a da conta).</span></div>`; return; }
   const sel = $("conn-form").account_id, keep = sel.value;
   sel.innerHTML = `<option value="">padrão da Capital.com</option>` + r.accounts.map((a) => `<option value="${esc(a.id)}">${esc(a.name || a.id)} · ${esc(a.type || "")} · ${money(a.balance)} ${esc(a.currency || "")}</option>`).join("");
   sel.value = keep || r.current || "";
-  $("conn-result").innerHTML = `<div class="status-box ok">Login OK no servidor DEMO. ${r.accounts.length} conta(s) encontrada(s). Modo hedging: ${r.hedging == null ? "?" : r.hedging ? "ligado" : "desligado"}. Escolha a conta e clique em <b>Salvar e conectar</b>.</div>`;
+  $("conn-result").innerHTML = `<div class="status-box ok">Login OK no servidor DEMO. ${r.accounts.length} conta(s). Modo hedging: ${r.hedging == null ? "?" : r.hedging ? "ligado" : "desligado"}. Escolha a conta e clique em <b>Salvar e conectar</b>.</div>`;
 };
 $("conn-form").addEventListener("submit", async (e) => {
   e.preventDefault(); const b = e.submitter; if (b) b.disabled = true;
-  $("conn-result").textContent = "Salvando e reconectando… (os agentes reiniciam)";
-  const r = await api("/api/connection/save", { method: "POST", body: credsBody() }).catch((x) => ({ error: x.message }));
+  const c = credsBody(); $("conn-result").textContent = "Salvando e reconectando… (os agentes reiniciam)";
+  const values = { BROKER: "capital_demo", CAPITAL_ACCOUNT_ID: c.account_id || " " };
+  if (c.api_key) values.CAPITAL_API_KEY = c.api_key; if (c.identifier) values.CAPITAL_IDENTIFIER = c.identifier; if (c.password) values.CAPITAL_PASSWORD = c.password;
+  const r = await post("/api/settings", { values }).catch((x) => ({ error: x.message }));
   if (b) b.disabled = false;
-  $("conn-result").innerHTML = r.mode === "capital" ? `<div class="status-box ok">Conectado à sua conta demo. Os agentes já estão operando nela.</div>` : `<div class="status-box err">Não conectou: ${esc(r.error || "?")}. O app continua no simulador.</div>`;
-  $("conn-form").password.value = ""; $("conn-form").api_key.value = ""; load(); loadConnection();
+  $("conn-result").innerHTML = r.mode === "capital" ? `<div class="status-box ok">Conectado à sua conta demo. Os agentes já estão operando nela.</div>` : `<div class="status-box err">Não conectou: ${esc(r.error || "?")}. O app continua em papel com dados reais.</div>`;
+  $("conn-form").password.value = ""; $("conn-form").api_key.value = ""; load(); loadSettings();
 });
-$("conn-sim").onclick = async () => { await api("/api/connection/simulator", { method: "POST" }); load(); loadConnection(); };
+$("conn-paper").onclick = async () => { await post("/api/settings", { values: { BROKER: "paper" } }); load(); loadSettings(); };
 $("to-btn").onclick = async (e) => {
   const epic = $("to-epic").value; if (!confirm(`Enviar uma ordem de teste mínima em ${epic} na conta demo e fechá-la em seguida?`)) return;
   e.target.disabled = true; $("to-result").textContent = "Enviando…";
-  const r = await api(`/api/connection/test-order?epic=${encodeURIComponent(epic)}`, { method: "POST" }).catch((x) => ({ ok: false, error: x.message }));
+  const r = await post(`/api/connection/test-order?epic=${encodeURIComponent(epic)}`).catch((x) => ({ ok: false, error: x.message }));
   e.target.disabled = false;
-  $("to-result").innerHTML = r.ok ? `<div class="status-box ok">Ordem ${esc(r.deal_id)} aberta a ${px(r.level)}, vista na conta e fechada (${esc(r.closed)}). Confira no app da Capital.com.</div>` : `<div class="status-box err">${esc(r.error || JSON.stringify(r))}</div>`;
+  $("to-result").innerHTML = r.ok ? `<div class="status-box ok">Ordem ${esc(r.deal_id)} aberta a ${px(r.level)}, vista na conta e fechada. Confira no app da Capital.com.</div>` : `<div class="status-box err">${esc(r.error || JSON.stringify(r))}</div>`;
 };
 function renderSys() {
-  const st = S.status;
-  $("sys-status").innerHTML = [["corretora", st.mode === "capital" ? "Capital.com DEMO" : "simulador"], ["preços", st.stream], ["sentimento", st.scorer === "claude" ? "Claude (IA)" : "dicionário (sem chave da Anthropic)"],
-    ["modelo ML", st.model], ["relógio do mercado", new Date(st.sim_time).toLocaleString("pt-BR")], ["pausa geral", st.kill_switch ? "LIGADA" : "desligada"]]
+  const st = S.status, llm = st.llm || {};
+  $("sys-status").innerHTML = [["modo", { papel: "papel com dados reais", capital: "Capital.com DEMO", simulador: "simulador" }[st.mode]],
+    ["preços", st.stream], ["dados Alpaca", st.alpaca?.keys ? `ok (${st.alpaca.feed === "sip" ? "SIP tempo real" : "IEX + SIP com 15 min"})` : "sem chaves"],
+    ["IA", llm.active], ["IA local", llm.local_url ? `${llm.local_kind} · ${llm.local_model} · ${llm.local_ok === true ? "online" : llm.local_ok === false ? "offline" : "?"}` : "não configurada"],
+    ["uso da IA", llm.stats ? `local ${llm.stats.local} · Claude ${llm.stats.claude} · dicionário ${llm.stats.dicionario}` : ""],
+    ["modelo ML", st.model], ["pesquisa", st.research?.status], ["SEC EDGAR", st.research?.sec], ["StockTwits", st.research?.stocktwits],
+    ["pausa geral", st.kill_switch ? "LIGADA" : "desligada"]]
     .map(([k, v]) => `<tr><td>${k}</td><td>${esc(v || "—")}</td></tr>`).join("");
 }
 
@@ -359,14 +456,17 @@ async function load() {
     const d = await api("/api/state");
     Object.assign(S, { status: d.status, account: d.account || {}, agents: d.agents, quotes: { ...S.quotes, ...d.quotes }, positions: d.positions,
       news: d.news, sentiment: d.sentiment, decisions: d.decisions, trades: d.trades, events: d.events, model: d.model,
+      volumes: d.volumes || {}, research: d.research || {},
       equity: d.equity.map((e) => ({ time: e.time, equity: e.equity, real_equity: e.real_equity })) });
     const sel = $("nf-ticker"), cur = sel.value; const tks = [...new Set(d.sentiment.map((s) => s.ticker))];
     sel.innerHTML = `<option value="">todos os ativos</option>` + tks.map((t) => `<option>${esc(t)}</option>`).join(""); sel.value = cur;
     renderHeader(); renderTape(); renderTab();
   } catch (e) { console.warn(e); }
 }
+let ES = null;
 function connect() {
-  const es = new EventSource("/api/stream");
+  if (ES) ES.close();
+  const es = ES = new EventSource(`${API_BASE}/api/stream${TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ""}`);
   const on = (k, fn) => es.addEventListener(k, (ev) => { lastMsg = Date.now(); try { fn(JSON.parse(ev.data).data); } catch (e) { console.warn(e); } });
   on("quote", (q) => { S.quotes[q.epic] = { ...q, open: S.quotes[q.epic]?.open ?? q.open }; renderTapeT(); renderQuotesT(); });
   on("news", (n) => { S.news.unshift(n); S.news.length = Math.min(S.news.length, 400); S.newsTimes.push(Date.now());
@@ -379,11 +479,31 @@ function connect() {
     if (S.equity.length > 720) S.equity.shift(); renderHeader(); if (TAB === "painel") { renderKpis(); renderEquityT(); } });
   on("event", (e) => { S.events.unshift(e); if (TAB === "ordens") renderEvents(); });
   on("status", (s) => { S.status = { ...S.status, ...s }; renderHeader(); });
+  on("volume", (v) => { S.volumes = v; renderQuotesT(); });
+  on("research", (r) => { S.research[r.epic] = r; if (TAB === "pesquisa") renderResearch(); });
   es.onerror = () => { $("live-pill").classList.remove("live"); };
 }
+function showLogin(msg) { $("login").hidden = false; if (msg) $("login-msg").textContent = msg; if (ES) { ES.close(); ES = null; } }
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); $("login-msg").textContent = "entrando…";
+  try { const r = await fetch(API_BASE + "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: e.target.password.value }) });
+    const j = await r.json(); if (!r.ok) throw new Error(j.detail || "falhou");
+    TOKEN = j.token; try { localStorage.setItem("token", TOKEN); } catch (x) {}
+    $("login").hidden = true; e.target.password.value = ""; start(); }
+  catch (err) { $("login-msg").textContent = err.message; }
+});
 $("kill-btn").onclick = async () => { const on = !S.status.kill_switch; await api(`/api/kill?on=${on}`, { method: "POST" }); S.status.kill_switch = on; renderHeader(); };
 $("theme-btn").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark"; try { localStorage.setItem("theme", document.documentElement.dataset.theme); } catch (e) {} };
 try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
 addEventListener("resize", throttle(() => renderTab(), 300));
-route(); load(); connect(); setInterval(load, 15000);
+let started = false;
+async function start() {
+  let h = {}; try { h = await (await fetch(API_BASE + "/api/health")).json(); } catch (e) { showLogin("Servidor indisponível. Verifique o endereço do backend."); return; }
+  if (h.blocked) { showLogin("O servidor está sem APP_PASSWORD. Defina essa variável no Railway para liberar o acesso."); return; }
+  if (h.auth_required && !TOKEN) { showLogin(); return; }
+  if (!h.auth_required && !TOKEN) { TOKEN = "local"; }
+  route(); await load(); connect();
+  if (!started) { started = true; setInterval(load, 15000); }
+}
+start();

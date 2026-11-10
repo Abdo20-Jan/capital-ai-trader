@@ -116,7 +116,11 @@ class BaseAgent:
 
     async def scan(self) -> None:
         for epic in self.epics():
-            df = await self.ctx.market.candles(epic, self.cfg.resolution, self.cfg.lookback)
+            try:
+                df = await self.ctx.market.candles(epic, self.cfg.resolution, self.cfg.lookback)
+            except Exception as e:  # noqa: BLE001 — sem dados reais para este ativo: pula, sem derrubar os outros
+                self.state[epic] = {"note": f"sem dados reais: {e}"}
+                continue
             if len(df) < self.min_bars + 1:
                 self.state[epic] = {"note": f"histórico curto ({len(df)} barras)"}
                 continue
@@ -156,6 +160,17 @@ class BaseAgent:
 
     async def exit_reason(self, position: dict, now: datetime) -> str | None:
         return None
+
+    def rvol(self, epic: str) -> float | None:
+        """Volume relativo consolidado (1 = volume normal para o horário). None = sem dado."""
+        fn = getattr(self.ctx, "volume", None)
+        v = fn(epic) if fn else None
+        return v.get("rvol") if v else None
+
+    def rbias(self, epic: str) -> float:
+        """Viés do Agente de Pesquisa (−1..+1, já ponderado pela confiança)."""
+        fn = getattr(self.ctx, "research_bias", None)
+        return float(fn(epic)) if fn else 0.0
 
     def bracket(self, a: float) -> tuple[float, float]:
         return self.cfg.stop_atr * a, self.cfg.tp_atr * a

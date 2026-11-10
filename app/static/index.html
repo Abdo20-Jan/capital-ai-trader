@@ -4,18 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Capital AI Trader</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="app.css">
+<script src="config.js"></script>
 </head>
 <body>
+<div class="login" id="login" hidden>
+  <form class="login-box" id="login-form">
+    <div class="brand">CAPITAL AI TRADER</div>
+    <p class="muted small">Acesso protegido. Digite a senha definida em <code>APP_PASSWORD</code> no servidor.</p>
+    <input type="password" name="password" placeholder="senha" autocomplete="current-password" required>
+    <button class="btn" type="submit">Entrar</button>
+    <div class="small" id="login-msg"></div>
+  </form>
+</div>
+
 <header class="top">
   <div class="brand">CAPITAL AI TRADER</div>
   <nav id="tabs">
     <a href="#painel" data-tab="painel">Painel</a>
     <a href="#agentes" data-tab="agentes">Agentes</a>
+    <a href="#pesquisa" data-tab="pesquisa">Pesquisa</a>
     <a href="#noticias" data-tab="noticias">Notícias</a>
     <a href="#ordens" data-tab="ordens">Ordens</a>
     <a href="#mercados" data-tab="mercados">Mercados</a>
-    <a href="#conexao" data-tab="conexao">Conexão</a>
+    <a href="#config" data-tab="config">Configurações</a>
   </nav>
   <div class="top-right">
     <span class="pill" id="mode-pill">…</span>
@@ -32,14 +44,8 @@
   <section class="tab" id="tab-painel">
     <div class="kpis" id="kpis"></div>
     <div class="grid g-2-1">
-      <div class="card">
-        <h2>Patrimônio da banca <small id="eq-sub"></small></h2>
-        <div class="chart" id="eq-chart"></div>
-      </div>
-      <div class="card">
-        <h2>Agentes <small><a href="#agentes">detalhes →</a></small></h2>
-        <div id="agent-mini"></div>
-      </div>
+      <div class="card"><h2>Patrimônio da banca <small id="eq-sub"></small></h2><div class="chart" id="eq-chart"></div></div>
+      <div class="card"><h2>Agentes <small><a href="#agentes">detalhes →</a></small></h2><div id="agent-mini"></div></div>
     </div>
     <div class="grid g-3">
       <div class="card"><h2>Notícias ao vivo <small id="news-rate"></small></h2><ul class="feed" id="news-live"></ul></div>
@@ -50,7 +56,7 @@
 
   <!-- ================= AGENTES ================= -->
   <section class="tab" id="tab-agentes" hidden>
-    <p class="lead">Cada agente tem um estilo e um tempo gráfico. Eles só <b>propõem</b> ordens: o gestor de risco decide se a ordem vai para a corretora. Agentes com resultado ruim nos últimos 15+ trades são pausados automaticamente.</p>
+    <p class="lead">Cada agente tem um estilo e um tempo gráfico. Eles só <b>propõem</b> ordens: o gestor de risco decide se a ordem vai para a corretora. Os agentes usam o <b>viés do Agente de Pesquisa</b> e o <b>volume consolidado</b> como filtros. Agentes com resultado ruim nos últimos 15+ trades são pausados automaticamente.</p>
     <div class="agents" id="agents"></div>
     <div class="card">
       <h2>Regras gerais de risco</h2>
@@ -65,6 +71,13 @@
       </form>
       <div id="model-box" class="muted small"></div>
     </div>
+  </section>
+
+  <!-- ================= PESQUISA ================= -->
+  <section class="tab" id="tab-pesquisa" hidden>
+    <p class="lead">O <b>Agente de Pesquisa</b> monta um dossiê com dados reais de cada ativo (preço e tendência, volume consolidado das bolsas, notícias, documentos oficiais da SEC e sentimento do StockTwits) e a IA escreve uma tese. <span id="research-status" class="muted"></span></p>
+    <div class="research" id="research"></div>
+    <div class="card" id="dossier-card" hidden><h2><span id="dossier-title">Dossiê</span><span class="filters"><button class="btn ghost sm" type="button" id="dossier-close">fechar</button></span></h2><div id="dossier"></div></div>
   </section>
 
   <!-- ================= NOTÍCIAS ================= -->
@@ -100,48 +113,78 @@
           <option value="MINUTE">1 min</option><option value="MINUTE_5">5 min</option><option value="MINUTE_15" selected>15 min</option>
           <option value="HOUR">1 h</option><option value="HOUR_4">4 h</option><option value="DAY">diário</option></select></span></h2>
       <div class="chart tall" id="px-chart"></div>
-      <div class="legend small"><span><i class="sw up"></i>candle de alta</span><span><i class="sw dn"></i>candle de baixa</span><span><i class="sw ln"></i>entrada / stop / alvo das posições</span></div>
+      <div class="chart short" id="vol-chart"></div>
+      <div class="legend small"><span><i class="sw up"></i>candle de alta</span><span><i class="sw dn"></i>candle de baixa</span><span><i class="sw ln"></i>entrada / stop / alvo das posições</span><span><i class="sw vol"></i><span id="vol-src">volume</span></span></div>
     </div>
   </section>
 
-  <!-- ================= CONEXÃO ================= -->
-  <section class="tab" id="tab-conexao" hidden>
+  <!-- ================= CONFIGURAÇÕES ================= -->
+  <section class="tab" id="tab-config" hidden>
+    <div class="card"><div id="conn-status" class="status-box"></div></div>
     <div class="grid g-2">
       <div class="card">
-        <h2>Conectar à Capital.com (conta DEMO)</h2>
-        <div id="conn-status" class="status-box"></div>
-        <ol class="steps">
-          <li>Na Capital.com, ative a <b>autenticação em dois fatores</b>.</li>
-          <li>Vá em <b>Configurações → API integrations → Generate new key</b>, crie uma <b>senha para a chave</b> e copie a chave.</li>
-          <li>Preencha abaixo, clique em <b>Testar</b>, escolha a conta demo e clique em <b>Salvar e conectar</b>.</li>
-        </ol>
+        <h2>1 · Dados de mercado reais (Alpaca)</h2>
+        <p class="small">Preços em tempo real e <b>volume consolidado de todas as bolsas dos EUA</b>, candles e notícias de agências. Crie uma conta grátis em <b>alpaca.markets</b> → Dashboard → API Keys. No plano grátis o volume consolidado vem com 15 min de atraso; o plano pago (SIP) é em tempo real.</p>
+        <form data-settings>
+          <label>API Key ID<input name="ALPACA_KEY_ID" type="password" autocomplete="off"></label>
+          <label>Secret Key<input name="ALPACA_SECRET_KEY" type="password" autocomplete="off"></label>
+          <label>Plano de dados<select name="ALPACA_FEED"><option value="iex">grátis (IEX tempo real + volume consolidado com 15 min)</option><option value="sip">pago (SIP tempo real)</option></select></label>
+          <div class="row"><button class="btn ghost" type="button" data-test="alpaca">Testar</button><button class="btn" type="submit">Salvar</button></div>
+        </form>
+        <div class="small" data-result="alpaca"></div>
+      </div>
+
+      <div class="card">
+        <h2>2 · Corretora: Capital.com (conta DEMO)</h2>
+        <p class="small">Sem a Capital.com, o app opera em <b>papel</b> com dados reais. Conectando, as ordens vão para a sua conta demo. Gere a chave em Configurações → API integrations (exige 2FA).</p>
         <form id="conn-form" autocomplete="off">
-          <label>Chave da API<input name="api_key" type="password" placeholder="deixe vazio para manter a atual"></label>
+          <label>Chave da API<input name="api_key" type="password"></label>
           <label>E-mail de login da Capital.com<input name="identifier" type="email"></label>
-          <label>Senha da CHAVE de API (não é a senha da conta)<input name="password" type="password" placeholder="deixe vazio para manter a atual"></label>
+          <label>Senha da CHAVE de API (não é a senha da conta)<input name="password" type="password"></label>
           <label>Conta demo<select name="account_id"><option value="">padrão da Capital.com</option></select></label>
           <div class="row">
             <button class="btn ghost" type="button" id="conn-test">Testar</button>
             <button class="btn" type="submit">Salvar e conectar</button>
-            <button class="btn ghost" type="button" id="conn-sim">Voltar ao simulador</button>
+            <button class="btn ghost" type="button" id="conn-paper">Usar papel (sem Capital)</button>
           </div>
         </form>
         <div id="conn-result" class="small"></div>
-        <p class="muted small">As credenciais ficam só no arquivo <code>.env</code> do seu computador (permissão só para o seu usuário). O app recusa a conta real: só opera no servidor DEMO.</p>
-      </div>
-      <div class="card">
-        <h2>Ordem de teste</h2>
-        <p class="small">Abre a menor posição possível na sua conta demo, confere se ela aparece e fecha em seguida. Depois confira no app da Capital.com.</p>
-        <div class="row"><select id="to-epic"></select><button class="btn" id="to-btn" type="button">Enviar ordem de teste</button></div>
+        <div class="row" style="margin-top:10px"><select id="to-epic"></select><button class="btn ghost" id="to-btn" type="button">Ordem de teste na demo</button></div>
         <div id="to-result" class="small"></div>
-        <h2 style="margin-top:18px">Status</h2>
+      </div>
+
+      <div class="card">
+        <h2>3 · Inteligência artificial</h2>
+        <p class="small">Analisa cada notícia e escreve as teses de pesquisa. <b>IA local</b>: rode um modelo (ex.: Qwen) com <b>Ollama</b> ou <b>LM Studio</b> num computador com GPU/memória suficiente e informe o endereço. Se o app estiver na nuvem, exponha esse endereço com um túnel seguro (ex.: Cloudflare Tunnel) e use uma chave.</p>
+        <form data-settings>
+          <label>Ordem de uso<select name="LLM_MODE"><option value="auto">automático: local → Claude → dicionário</option><option value="local">só IA local</option><option value="claude">só Claude</option><option value="off">só dicionário</option></select></label>
+          <label>Servidor local<select name="LOCAL_LLM_KIND"><option value="ollama">Ollama</option><option value="openai">OpenAI-compatível (LM Studio, vLLM, llama.cpp)</option></select></label>
+          <label>Endereço da IA local<input name="LOCAL_LLM_URL" placeholder="http://localhost:11434 ou https://meu-tunel.exemplo.com"></label>
+          <label>Modelo<input name="LOCAL_LLM_MODEL" placeholder="ex.: qwen3:32b"></label>
+          <label>Chave do servidor local (opcional)<input name="LOCAL_LLM_API_KEY" type="password"></label>
+          <label>Raciocínio (modelos "thinking")<select name="LOCAL_LLM_THINK"><option value="">padrão do modelo</option><option value="0">desligado (mais rápido)</option><option value="1">ligado</option></select></label>
+          <label>Chave da Anthropic (Claude) — reserva<input name="ANTHROPIC_API_KEY" type="password"></label>
+          <div class="row"><button class="btn ghost" type="button" data-test="llm">Testar IA</button><button class="btn" type="submit">Salvar</button></div>
+        </form>
+        <div class="small" data-result="llm"></div>
+      </div>
+
+      <div class="card">
+        <h2>4 · Pesquisa e ativos</h2>
+        <form data-settings>
+          <label>E-mail de contato para a SEC (documentos oficiais) <span class="hint">exigido pela SEC no acesso automatizado</span><input name="SEC_CONTACT_EMAIL" type="email"></label>
+          <label>Ativos (EPIC da Capital.com, separados por vírgula; cripto: BTCUSD, ETHUSD)<input name="WATCHLIST"></label>
+          <div class="row"><button class="btn" type="submit">Salvar</button></div>
+        </form>
+        <h2 style="margin-top:16px">Status</h2>
         <table class="kv" id="sys-status"></table>
       </div>
     </div>
+    <p class="muted small">As credenciais ficam criptografadas no banco do servidor. Variáveis de ambiente do servidor têm prioridade e aparecem como "definida no servidor". O app só aceita o servidor DEMO da Capital.com.</p>
   </section>
 </main>
-<footer class="foot">Conta DEMO / simulação. Resultados passados ou simulados não garantem resultados futuros. CFDs são alavancados e a maioria das contas de varejo perde dinheiro.</footer>
+<footer class="foot">Dados de mercado reais; saldo virtual (papel ou conta demo). Resultados passados não garantem resultados futuros. CFDs são alavancados e a maioria das contas de varejo perde dinheiro.</footer>
 <div class="tip" id="tip"></div>
-<script src="/static/app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

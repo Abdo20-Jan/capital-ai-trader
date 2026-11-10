@@ -187,7 +187,7 @@ def cmd_dashboard(s, port: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Bot de trading com IA para a conta DEMO da Capital.com")
     ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all", "reset",
-                                       "test-order", "app"])
+                                       "test-order", "app", "serve"])
     ap.add_argument("term", nargs="?", help="termo de busca (para 'search')")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--sell", action="store_true", help="test-order: testar uma VENDA em vez de compra")
@@ -201,6 +201,14 @@ def main() -> int:
 
     if a.command == "check":
         return cmd_check(s)
+    if a.command == "serve":                      # nuvem (Railway, Docker): link público, exige APP_PASSWORD
+        import os
+        import uvicorn
+        from app.main import create_app
+        port = int(os.environ.get("PORT", a.port))
+        uvicorn.run(create_app(public=True), host="0.0.0.0", port=port, log_level="info", proxy_headers=True,
+                    forwarded_allow_ips="*")
+        return 0
     if a.command == "app":
         import uvicorn
         from app.main import create_app

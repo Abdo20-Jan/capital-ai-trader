@@ -1,0 +1,9 @@
+.git
+.venv
+.env
+data/
+models/
+__pycache__/
+*.pyc
+.pytest_cache/
+capital-ai-trader.zip

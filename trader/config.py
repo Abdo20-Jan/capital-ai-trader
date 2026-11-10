@@ -92,7 +92,8 @@ def parse_watchlist(raw: str) -> list[WatchItem]:
 
 def get_settings() -> Settings:
     load_dotenv()
-    db = Path(_s("DB_PATH", "data/trader.db"))
+    data_dir = Path(_s("DATA_DIR", str(ROOT / "data")))       # no Railway: volume persistente (ex.: /data)
+    db = Path(_s("DB_PATH", str(data_dir / "trader.db")))
     if not db.is_absolute():
         db = ROOT / db
     s = Settings(
@@ -122,6 +123,7 @@ def get_settings() -> Settings:
         prob_threshold=_f("PROB_THRESHOLD", 0.50),
         sentiment_weight=_f("SENTIMENT_WEIGHT", 0.10),
         db_path=db,
+        model_dir=Path(_s("MODEL_DIR", str(data_dir / "models"))),
     )
     if s.broker not in ("paper", "capital_demo"):
         raise ValueError(f"BROKER inválido: {s.broker!r} (use 'paper' ou 'capital_demo')")

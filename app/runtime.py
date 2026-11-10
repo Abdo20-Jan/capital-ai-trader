@@ -1,31 +1,51 @@
-"""Orquestra o app: corretora, preços ao vivo, notícias, agentes, gestor de risco."""
+"""Orquestra o app: corretora, dados reais, notícias, pesquisa, agentes e gestor de risco.
+
+Modos:
+  papel    → preços, candles, volume e notícias REAIS (Alpaca + RSS); saldo e ordens virtuais.
+  capital  → tudo real na sua conta DEMO da Capital.com (o saldo da demo é virtual).
+  simulador→ só para testes automáticos (APP_MODE=sim). Nunca é escolhido sozinho.
+"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import statistics
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from trader.config import Settings, get_settings
-from trader.sentiment import make_scorer
 
 from .agents.strategies import DayTraderAgent, NewsAgent, default_agents
 from .bus import EventBus
+from .data.alpaca import AlpacaData, is_crypto
 from .db import AppDB
+from .llm import LLMRouter, RouterScorer
 from .market import MarketData
 from .newsfeed import NewsFeed
 from .orders import OrderManager
+from .paper_real import PaperRealBroker
+from .research import ResearchAgent
+from .secure import Vault
 from .sim import SimBroker
 
 log = logging.getLogger(__name__)
+NY = ZoneInfo("America/New_York")
 
 
 class Runtime:
     def __init__(self, settings: Settings | None = None):
+        given = settings is not None
         self.settings = settings or get_settings()
-        self.bus = EventBus()
+        self.data_dir = self.settings.db_path.parent
         self.db = AppDB(self.settings.db_path.with_name("app.db"))
+        self.vault = Vault(self.db, self.data_dir)
+        self.vault.apply()
+        if not given:
+            self.settings = get_settings()
+        self._model_base = self.settings.model_dir
+        self.bus = EventBus()
         self.tasks: list[asyncio.Task] = []
         self.broker = None
         self.broker_id = ""
@@ -35,10 +55,15 @@ class Runtime:
         self.max_total_positions = int(os.environ.get("MAX_TOTAL_POSITIONS", "6") or 6)
         self.model_status = "não treinado"
         self.last_account: dict = {}
+        self.volumes: dict[str, dict] = {}
+        self._daily_vol: dict[str, tuple[float, float]] = {}
         self.agents = []
         self.orders: OrderManager | None = None
         self.market: MarketData | None = None
         self.news: NewsFeed | None = None
+        self.research: ResearchAgent | None = None
+        self.router: LLMRouter | None = None
+        self.alpaca: AlpacaData | None = None
 
     # ------------------------------------------------------------ helpers usados pelos agentes
     @property
@@ -57,6 +82,12 @@ class Runtime:
 
     def sentiment(self, epic: str) -> float:
         return self.news.sentiment_for(self.ticker_for(epic)) if self.news else 0.0
+
+    def research_bias(self, epic: str) -> float:
+        return self.research.bias(epic) if self.research else 0.0
+
+    def volume(self, epic: str) -> dict | None:
+        return self.volumes.get(epic)
 
     def agent_name(self, key: str | None) -> str:
         a = next((a for a in self.agents if a.cfg.key == key), None)
@@ -83,7 +114,7 @@ class Runtime:
             self.event(f"{a.cfg.name} pausado — {a.paused_reason}. Reative no painel quando quiser.", "warn")
             self.save_agent_configs()
 
-    # ------------------------------------------------------------ configuração dos agentes
+    # ------------------------------------------------------------ agentes
     def save_agent_configs(self) -> None:
         self.db.set_json("agents", {a.cfg.key: {k: getattr(a.cfg, k) for k in a.cfg.EDITABLE} for a in self.agents})
 
@@ -99,53 +130,67 @@ class Runtime:
     # ------------------------------------------------------------ corretora
     def _make_broker(self):
         s = self.settings
+        if os.environ.get("APP_MODE", "").lower() == "sim":
+            self.speed = float(os.environ.get("SIM_SPEED", "5") or 5)
+            return (SimBroker(self.epics, start_balance=s.start_balance, leverage=s.max_leverage, speed=self.speed),
+                    "simulador", "simulador")
         if s.broker == "capital_demo" and s.capital_api_key and s.capital_identifier and s.capital_password:
             from trader.capital import CapitalClient
             c = CapitalClient(s.capital_api_key, s.capital_identifier, s.capital_password,
                               account_id=s.capital_account_id)
             c.login()
             return c, "capital", f"capital:{c.current_account_id}"
-        self.speed = float(os.environ.get("SIM_SPEED", "5") or 5)
-        return (SimBroker(self.epics, start_balance=s.start_balance, leverage=s.max_leverage, speed=self.speed),
-                "simulador", "simulador")
+        return PaperRealBroker(self.alpaca, self.db, s.start_balance, s.max_leverage), "papel", "papel"
 
     async def start(self) -> None:
         self.bus.bind(asyncio.get_running_loop())
         self.connection_error = ""
+        self.alpaca = AlpacaData(os.environ.get("ALPACA_KEY_ID", ""), os.environ.get("ALPACA_SECRET_KEY", ""),
+                                 os.environ.get("ALPACA_FEED", "iex"))
+        self.router = LLMRouter()
         try:
             self.broker, self.mode, self.broker_id = await asyncio.to_thread(self._make_broker)
         except Exception as e:  # noqa: BLE001
             self.connection_error = str(e)
-            log.error("Falha ao conectar na Capital.com: %s — usando o simulador", e)
+            log.error("Falha ao conectar na Capital.com: %s", e)
             self.settings.broker = "paper"
             self.broker, self.mode, self.broker_id = await asyncio.to_thread(self._make_broker)
-            self.event(f"Não foi possível conectar na Capital.com ({e}). Rodando no SIMULADOR.", "error")
-        if self.mode == "capital":
+            self.event(f"Não foi possível conectar na Capital.com ({e}). Operando em PAPEL com dados reais.", "error")
+        if self.mode != "simulador":
             self.speed = 1.0
-        # modelos separados: o que aprendeu no simulador NUNCA é usado no mercado real
-        base_dir = self._model_base = getattr(self, "_model_base", None) or self.settings.model_dir
-        self.settings.model_dir = base_dir / ("capital" if self.mode == "capital" else "simulador")
+        # modelos separados por modo: o que aprendeu em dados sintéticos nunca vai para o mercado real
+        self.settings.model_dir = self._model_base / ("simulador" if self.mode == "simulador" else "real")
         self.market = MarketData(self.broker, self.epics, self.bus)
         self.orders = OrderManager(self)
         self.orders.kill_switch = bool(self.db.get("kill_switch", False))
-        self.news = NewsFeed(self, make_scorer(self.settings.anthropic_api_key, self.settings.claude_model,
-                                               [w.ticker for w in self.settings.watchlist]))
+        self.news = NewsFeed(self, RouterScorer(self.router, [w.ticker for w in self.settings.watchlist]))
+        self.research = ResearchAgent(self, self.router)
         self._build_agents()
 
+        add = lambda coro: self.tasks.append(asyncio.create_task(coro))  # noqa: E731
         if self.mode == "simulador":
-            self.tasks.append(asyncio.create_task(self.market.run_sim_ticks(self.orders.on_sim_closed)))
-            self.tasks.append(asyncio.create_task(self.news.run_sim()))
+            add(self.market.run_sim_ticks(self.orders.on_sim_closed))
+            add(self.news.run_sim())
         else:
-            self.tasks.append(asyncio.create_task(self.market.run_capital_stream()))
-            self.tasks.append(asyncio.create_task(self.news.run()))
-        self.tasks.append(asyncio.create_task(self._sync_loop()))
-        self.tasks.append(asyncio.create_task(self._account_loop()))
-        self.tasks.append(asyncio.create_task(self._train_model()))
-        await asyncio.sleep(1.5)                              # primeiras cotações antes dos agentes
+            if self.mode == "capital":
+                add(self.market.run_capital_stream())
+            else:
+                add(self.market.run_paper_quotes(self.alpaca, self.broker, self.orders.on_sim_closed))
+            add(self.news.run())
+            add(self._volume_loop())
+            add(self.research.run())
+            add(self._llm_health_loop())
+        add(self._sync_loop())
+        add(self._account_loop())
+        add(self._train_model())
+        await asyncio.sleep(1.5)
         for a in self.agents:
-            self.tasks.append(asyncio.create_task(a.run()))
-        self.event(f"App iniciado — corretora: {'Capital.com DEMO' if self.mode == 'capital' else 'simulador'}, "
-                   f"{len(self.agents)} agentes, sentimento: {self.news.scorer.name}", "info")
+            add(a.run())
+        names = {"capital": "Capital.com DEMO (dados e ordens reais, saldo da demo)",
+                 "papel": "PAPEL com dados reais (saldo e ordens virtuais)", "simulador": "simulador (testes)"}
+        self.event(f"App iniciado — {names[self.mode]}, {len(self.agents)} agentes + pesquisa, IA: {self.router.active()}", "info")
+        if self.mode == "papel" and not self.alpaca.has_keys and any(not is_crypto(e) for e in self.epics):
+            self.event("Configure as chaves da Alpaca em Configurações para receber preços e volume reais das ações.", "warn")
         self.bus.publish("status", self.status())
 
     async def stop(self) -> None:
@@ -156,9 +201,9 @@ class Runtime:
 
     async def restart(self) -> None:
         await self.stop()
+        self.vault.apply()
         self.settings = get_settings()
-        if getattr(self, "_model_base", None):
-            self.settings.model_dir = self._model_base
+        self._model_base = self.settings.model_dir
         await self.start()
 
     # ------------------------------------------------------------ laços
@@ -193,24 +238,77 @@ class Runtime:
                 log.warning("conta: %s", e)
             await asyncio.sleep(5)
 
+    async def _llm_health_loop(self) -> None:
+        while True:
+            await asyncio.to_thread(self.router.health, True)
+            self.bus.publish("status", {"llm": self.router.status()})
+            await asyncio.sleep(120)
+
+    async def _volume_loop(self) -> None:
+        """Volume CONSOLIDADO das bolsas dos EUA (Alpaca/SIP) e volume relativo (RVOL)."""
+        while True:
+            try:
+                if self.alpaca.has_keys:
+                    stocks = [e for e in self.epics if not is_crypto(e)]
+                    cons = await asyncio.to_thread(self.alpaca.consolidated_volume, stocks)
+                    for epic, v in cons.items():
+                        avg = await self._avg_daily_volume(epic)
+                        frac = self._session_fraction(v.get("as_of"))
+                        rvol = (v["day_volume"] / (avg * frac)) if (avg and v.get("day_volume") and frac) else None
+                        self.volumes[epic] = {**v, "avg20": avg, "rvol": round(rvol, 2) if rvol else None,
+                                              "source": "SIP (todas as bolsas dos EUA)",
+                                              "delay": "15 min" if v.get("delayed") else "tempo real"}
+                    if cons:
+                        self.bus.publish("volume", self.volumes)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.warning("volume: %s", e)
+            await asyncio.sleep(60)
+
+    async def _avg_daily_volume(self, epic: str) -> float | None:
+        cached = self._daily_vol.get(epic)
+        if cached and time.time() - cached[0] < 6 * 3600:
+            return cached[1]
+        bars = await asyncio.to_thread(self.alpaca.sip_candles, epic, "DAY", 25)
+        today = datetime.now(NY).date().isoformat()
+        vols = [b.volume for b in bars if not b.time.startswith(today)][-20:]
+        avg = statistics.mean(vols) if vols else None
+        self._daily_vol[epic] = (time.time(), avg)
+        return avg
+
+    @staticmethod
+    def _session_fraction(as_of: str | None) -> float:
+        try:
+            t = datetime.fromisoformat(str(as_of).replace("Z", "+00:00")).astimezone(NY)
+        except (TypeError, ValueError):
+            return 1.0
+        mins = (t.hour * 60 + t.minute) - (9 * 60 + 30)
+        return max(0.05, min(1.0, mins / 390)) if mins > 0 else 1.0
+
     async def _train_model(self, force: bool = False) -> None:
-        from trader.model import make_dataset, train_and_maybe_promote
         from trader.features import to_frame
+        from trader.model import make_dataset, train_and_maybe_promote
         day = next((a for a in self.agents if isinstance(a, DayTraderAgent)), None)
         if day is None:
             return
-        last = self.db.get(f"model_trained_at:{self.mode}") or 0
+        key = f"model_trained_at:{self.mode}"
+        last = self.db.get(key) or 0
         if day.model.ready and not force and time.time() - last < 7 * 86400:
             self.model_status = f"pronto ({day.model.report.version})"
             return
-        self.model_status = "treinando…"
+        self.model_status = "treinando com dados reais…" if self.mode != "simulador" else "treinando…"
         self.bus.publish("status", self.status())
         try:
             def work():
                 s = self.settings
                 frames = {}
                 for e in self.epics:
-                    df = to_frame(self.broker.candles(e, day.cfg.resolution, s.history_bars))
+                    try:
+                        df = to_frame(self.broker.candles(e, day.cfg.resolution, s.history_bars))
+                    except Exception as ex:  # noqa: BLE001
+                        log.warning("treino: sem candles de %s: %s", e, ex)
+                        continue
                     if len(df) > 60:
                         frames[e] = df
                 data = make_dataset(frames, day.cfg.stop_atr, day.cfg.tp_atr)
@@ -218,17 +316,16 @@ class Runtime:
                                                day.cfg.stop_atr, day.cfg.tp_atr)
             rep = await asyncio.to_thread(work)
             self.db.add_model_report(rep)
-            self.db.set(f"model_trained_at:{self.mode}", time.time())
+            self.db.set(key, time.time())
             day.reload_model()
-            self.model_status = (f"pronto ({day.model.report.version})" if day.model.ready
-                                 else "sem modelo aprovado")
+            self.model_status = (f"pronto ({day.model.report.version})" if day.model.ready else "sem modelo aprovado")
             self.event(f"Modelo ML: AUC {rep.auc_long:.3f}/{rep.auc_short:.3f}, {rep.expectancy_r:+.3f}R em "
                        f"{rep.trades} trades de teste — {rep.note}", "model")
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            self.model_status = f"erro no treino: {e}"
-            self.event(f"Treino do modelo falhou: {e}", "error")
+            self.model_status = f"sem modelo: {e}"
+            self.event(f"Treino do modelo não concluído: {e}", "warn")
         self.bus.publish("status", self.status())
 
     # ------------------------------------------------------------ estado para o painel
@@ -236,9 +333,14 @@ class Runtime:
         s = self.settings
         return {"mode": self.mode, "broker_id": self.broker_id, "connection_error": self.connection_error,
                 "stream": self.market.stream_status if self.market else "", "speed": self.speed,
-                "scorer": self.news.scorer.name if self.news else "", "model": self.model_status,
-                "kill_switch": self.orders.kill_switch if self.orders else False,
+                "scorer": self.router.active() if self.router else "", "llm": self.router.status() if self.router else {},
+                "model": self.model_status, "kill_switch": self.orders.kill_switch if self.orders else False,
                 "news_sources": self.news.sources_status if self.news else {},
+                "research": {"status": self.research.status if self.research else "",
+                             "sec": self.research.sec.status if self.research else "",
+                             "stocktwits": self.research.twits.status if self.research else "",
+                             "interval_min": self.research.interval_min if self.research else None},
+                "alpaca": {"keys": bool(self.alpaca and self.alpaca.has_keys), "feed": self.alpaca.feed if self.alpaca else "",
+                           "error": self.alpaca.last_error if self.alpaca else ""},
                 "start": s.start_balance, "target": s.target_balance, "max_daily_loss": s.max_daily_loss,
-                "stop_at_target": s.stop_at_target, "epics": self.epics,
-                "sim_time": self.now().isoformat()}
+                "stop_at_target": s.stop_at_target, "epics": self.epics, "sim_time": self.now().isoformat()}

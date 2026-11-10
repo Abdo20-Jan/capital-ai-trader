@@ -31,6 +31,9 @@ class ScalperAgent(BaseAgent):
         spread = (q["ask"] - q["bid"]) if q else 0.0
         if spread > self.cfg.params.get("max_spread_atr", 0.3) * a:
             return None, f"spread alto ({spread:.4g} > {self.cfg.params.get('max_spread_atr', 0.3)}×ATR)"
+        rv = self.rvol(epic)
+        if rv is not None and rv < self.cfg.params.get("min_rvol", 0.7):
+            return None, f"volume fraco (RVOL {rv:.2f}) — scalp precisa de liquidez"
         up = last["ema9"] > last["ema21"] and last["close"] > last["ema9"] and prev["low"] <= prev["ema9"]
         dn = last["ema9"] < last["ema21"] and last["close"] < last["ema9"] and prev["high"] >= prev["ema9"]
         sd, td = self.bracket(a)
@@ -72,10 +75,12 @@ class DayTraderAgent(BaseAgent):
         pl, ps = self.model.predict(feats)
         w = self.cfg.params.get("sentiment_weight", 0.10)
         thr = self.cfg.params.get("threshold", 0.52)
-        long_p, short_p = float(pl[0]) + w * sent, float(ps[0]) - w * sent
+        rb = self.rbias(epic)
+        long_p = float(pl[0]) + w * sent + 0.05 * rb
+        short_p = float(ps[0]) - w * sent - 0.05 * rb
         a = float(feats["atr"].iloc[0])
         sd, td = self.bracket(a)
-        note = f"P(compra) {long_p:.2f} · P(venda) {short_p:.2f}"
+        note = f"P(compra) {long_p:.2f} · P(venda) {short_p:.2f}" + (f" · pesquisa {rb:+.2f}" if rb else "")
         if long_p >= thr and long_p >= short_p:
             return Signal("BUY", sd, td, f"ML {note}", long_p), note
         if short_p >= thr and short_p > long_p:
@@ -102,12 +107,17 @@ class SwingAgent(BaseAgent):
         if math.isnan(_f(last["ema200"])) or math.isnan(a):
             return None, "aguardando 200 candles"
         sd, td = self.bracket(a)
+        rb = self.rbias(epic)
         uptrend = last["ema50"] > last["ema200"] and last["close"] > last["ema200"]
         downtrend = last["ema50"] < last["ema200"] and last["close"] < last["ema200"]
         if uptrend and prev["rsi14"] < 40 <= last["rsi14"] and sent > -0.3:
-            return Signal("BUY", sd, td, f"recuo terminou em tendência de alta (RSI {last['rsi14']:.0f})"), "compra"
+            if rb < -0.25:
+                return None, f"compra técnica vetada pela pesquisa (viés {rb:+.2f})"
+            return Signal("BUY", sd, td, f"recuo terminou em tendência de alta (RSI {last['rsi14']:.0f}, pesquisa {rb:+.2f})"), "compra"
         if downtrend and prev["rsi14"] > 60 >= last["rsi14"] and sent < 0.3:
-            return Signal("SELL", sd, td, f"repique terminou em tendência de baixa (RSI {last['rsi14']:.0f})"), "venda"
+            if rb > 0.25:
+                return None, f"venda técnica vetada pela pesquisa (viés {rb:+.2f})"
+            return Signal("SELL", sd, td, f"repique terminou em tendência de baixa (RSI {last['rsi14']:.0f}, pesquisa {rb:+.2f})"), "venda"
         trend = "alta" if uptrend else "baixa" if downtrend else "lateral"
         return None, f"tendência {trend}, RSI14 {last['rsi14']:.0f} — esperando recuo"
 
@@ -128,7 +138,8 @@ class LongTermAgent(BaseAgent):
         mom = last["close"] / ind["close"].iloc[-min(len(ind), 121)] - 1
         regime = last["close"] > last["sma200"] and last["sma50"] > last["sma200"] and mom > 0
         sd, td = self.bracket(a)
-        if regime and prev["close"] <= prev["sma50"] < last["close"] and sent > -0.5:
+        rb = self.rbias(epic)
+        if regime and prev["close"] <= prev["sma50"] < last["close"] and sent > -0.5 and rb > -0.2:
             return Signal("BUY", sd, td, f"tendência longa + retomada da média 50 (momento {mom:+.0%})"), "compra"
         bear = last["close"] < last["sma200"] and last["sma50"] < last["sma200"] and mom < 0
         if self.cfg.allow_short and bear and prev["close"] >= prev["sma50"] > last["close"] and sent < 0.5:
@@ -185,6 +196,10 @@ class NewsAgent(BaseAgent):
         if age > p.get("max_age_min", 15):
             self.state[epic] = {"note": f"notícia velha ({age:.0f} min): {title}"}
             return
+        rv = self.rvol(epic)
+        if rv is not None and rv < p.get("min_rvol", 0.8):
+            self.state[epic] = {"note": f"volume não confirma (RVOL {rv:.2f}): {title}"}
+            return
         if time.time() - self.cooldown.get(epic, 0) < p.get("cooldown_min", 30) * 60 / max(self.ctx.speed, 1):
             self.state[epic] = {"note": f"em pausa após trade recente: {title}"}
             return
@@ -207,7 +222,7 @@ def default_agents() -> list[tuple[type, AgentConfig]]:
             key="scalp", name="Scalper", style="Scalp", resolution="MINUTE", interval_s=3,
             description="Operações de minutos no gráfico de 1 min: recuos na micro-tendência, stop e alvo curtos.",
             risk_per_trade=0.005, margin_share=0.15, max_positions=2, stop_atr=1.0, tp_atr=1.5,
-            max_hold_min=20, lookback=120, params={"max_spread_atr": 0.3})),
+            max_hold_min=20, lookback=120, params={"max_spread_atr": 0.3, "min_rvol": 0.7})),
         (DayTraderAgent, AgentConfig(
             key="day", name="Day Trader (ML)", style="Day trade", resolution="MINUTE_15", interval_s=10,
             description="Modelo de Machine Learning + sentimento no gráfico de 15 min. Zera tudo antes do fim do dia.",
@@ -229,5 +244,6 @@ def default_agents() -> list[tuple[type, AgentConfig]]:
             description="Reage em segundos a notícias relevantes classificadas pela IA, na direção do sentimento.",
             risk_per_trade=0.01, margin_share=0.15, max_positions=2, stop_atr=1.5, tp_atr=3.0,
             max_hold_min=120, lookback=60,
-            params={"min_relevance": 0.6, "min_sentiment": 0.5, "max_age_min": 15, "cooldown_min": 30})),
+            params={"min_relevance": 0.6, "min_sentiment": 0.5, "max_age_min": 15, "cooldown_min": 30,
+                    "min_rvol": 0.8})),
     ]

@@ -10,18 +10,6 @@ import pytest
 from trader.broker import Account
 
 
-# ------------------------------------------------------------------ .env
-def test_write_env_updates_and_appends(tmp_path, monkeypatch):
-    from app.main import write_env
-    p = tmp_path / ".env"
-    p.write_text("# comentário\nBROKER=paper\nCAPITAL_API_KEY=\n")
-    write_env({"BROKER": "capital_demo", "CAPITAL_API_KEY": "abc", "CAPITAL_ACCOUNT_ID": "123"}, p)
-    txt = p.read_text()
-    assert "# comentário" in txt and "BROKER=capital_demo" in txt and "CAPITAL_API_KEY=abc" in txt
-    assert "CAPITAL_ACCOUNT_ID=123" in txt and txt.count("BROKER=") == 1
-    assert oct(p.stat().st_mode)[-3:] == "600"
-
-
 # ------------------------------------------------------------------ gestor de risco
 class FakeCtx:
     def __init__(self, tmp_path):
@@ -151,7 +139,8 @@ def test_capital_stream_parses_quotes(monkeypatch):
 # ------------------------------------------------------------------ app completo no simulador
 def test_app_end_to_end_simulator(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    for k, v in {"BROKER": "paper", "DB_PATH": str(tmp_path / "t.db"), "SIM_SPEED": "60", "ANTHROPIC_API_KEY": "",
+    for k, v in {"APP_MODE": "sim", "BROKER": "paper", "DATA_DIR": str(tmp_path), "DB_PATH": str(tmp_path / "t.db"),
+                 "SIM_SPEED": "60", "ANTHROPIC_API_KEY": "", "LOCAL_LLM_URL": "", "ALPACA_KEY_ID": "",
                  "WATCHLIST": "AAPL,NVDA,TSLA", "HISTORY_BARS": "800"}.items():
         monkeypatch.setenv(k, v)
     from app.main import create_app
@@ -160,16 +149,221 @@ def test_app_end_to_end_simulator(tmp_path, monkeypatch):
     s = get_settings()
     s.model_dir = tmp_path / "models"
     with TestClient(create_app(Runtime(s))) as c:
+        c.headers["Authorization"] = "Bearer " + c.post("/api/login", json={"password": ""}).json()["token"]
         time.sleep(12)
         st = c.get("/api/state").json()
         assert st["status"]["mode"] == "simulador"
         assert {a["config"]["key"] for a in st["agents"]} == {"scalp", "day", "swing", "long", "news"}
         assert set(st["quotes"]) == {"AAPL", "NVDA", "TSLA"}
         assert st["account"]["equity"] > 0
-        assert len(c.get("/api/candles", params={"epic": "AAPL", "res": "MINUTE_5"}).json()) > 50
+        assert len(c.get("/api/candles", params={"epic": "AAPL", "res": "MINUTE_5"}).json()["candles"]) > 50
         assert c.post("/api/kill", params={"on": "true"}).json()["kill_switch"] is True
         r = c.post("/api/agents/scalp", json={"enabled": False, "risk_per_trade": 0.002}).json()
         assert r["config"]["enabled"] is False and r["config"]["risk_per_trade"] == 0.002
-        assert c.get("/api/connection").json()["mode"] == "simulador"
         assert c.post("/api/close-all").status_code == 200
         assert c.post("/api/connection/test-order", params={"epic": "AAPL"}).status_code == 400   # só com Capital
+        sv = c.get("/api/settings").json()
+        assert "ALPACA_SECRET_KEY" in sv["values"] and "llm" in sv and sv["mode"] == "simulador"
+        assert c.get("/").status_code == 200 and "app.js" in c.get("/").text                 # frontend no mesmo servidor
+        assert c.get("/config.js").status_code == 200
+
+
+# ------------------------------------------------------------------ login e cofre
+def test_auth_public_requires_password(tmp_path, monkeypatch):
+    from app.secure import Auth
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    a = Auth(tmp_path, public=True)
+    assert a.blocked and not a.verify("x")
+    monkeypatch.setenv("APP_PASSWORD", "segredo")
+    a = Auth(tmp_path, public=True)
+    assert not a.blocked and a.check_password("segredo") and not a.check_password("errada")
+    tok = a.issue()
+    assert a.verify(tok) and not a.verify(tok + "0") and not a.verify("123.abc")
+
+    monkeypatch.delenv("APP_PASSWORD")
+    assert Auth(tmp_path, public=False).verify(None)          # local sem senha: liberado
+
+
+def test_vault_encrypts_and_respects_server_env(tmp_path, monkeypatch):
+    from app.db import AppDB
+    from app.secure import Vault
+    monkeypatch.setenv("ALPACA_FEED", "sip")                  # definido no servidor
+    monkeypatch.delenv("ALPACA_KEY_ID", raising=False)
+    db = AppDB(tmp_path / "a.db")
+    v = Vault(db, tmp_path)
+    v.save({"ALPACA_KEY_ID": "PKSECRET123", "ALPACA_FEED": "iex", "NAO_PERMITIDA": "x"})
+    raw = db.get("vault")
+    assert "PKSECRET123" not in raw                           # criptografado no banco
+    import os
+    assert os.environ["ALPACA_KEY_ID"] == "PKSECRET123"
+    assert os.environ["ALPACA_FEED"] == "sip"                 # variável do servidor tem prioridade
+    view = v.public_view()
+    assert view["ALPACA_KEY_ID"]["set"] and "PKSECRET123" not in json.dumps(view)
+    monkeypatch.delenv("ALPACA_KEY_ID")
+
+
+# ------------------------------------------------------------------ IA local (Ollama/OpenAI-compatível simulados)
+def test_llm_router_local_ollama_then_fallback(monkeypatch):
+    import requests
+    from app.llm import LLMRouter, RouterScorer
+    monkeypatch.setenv("LLM_MODE", "auto")
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://gpu:11434")
+    monkeypatch.setenv("LOCAL_LLM_KIND", "ollama")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "qwen3:32b")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calls = []
+
+    class R:
+        def __init__(self, data, status=200): self._d, self.status_code = data, status
+        def json(self): return self._d
+        def raise_for_status(self):
+            if self.status_code >= 400: raise requests.HTTPError(str(self.status_code))
+
+    def fake_get(url, **k):
+        return R({"models": [{"name": "qwen3:32b"}]})
+
+    def fake_post(url, json=None, **k):
+        calls.append((url, json))
+        assert json["format"]["type"] == "object" and json["stream"] is False
+        content = '<think>pensando</think>{"items":[{"id":"a","ticker":"AAPL","topic":"EARN","sentiment":0.8,"relevance":0.9}]}'
+        return R({"message": {"content": content}})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", fake_post)
+    r = LLMRouter()
+    sc = RouterScorer(r, ["AAPL"]).score([{"id": "a", "ticker": "AAPL", "title": "Apple beats"}])
+    assert sc[0].scorer == "IA local" and sc[0].sentiment == 0.8 and calls[0][0] == "http://gpu:11434/api/chat"
+    assert "local" in r.active()
+
+    def broken_post(url, json=None, **k):
+        raise requests.ConnectionError("túnel caiu")
+    monkeypatch.setattr(requests, "post", broken_post)
+    sc = RouterScorer(r, ["AAPL"]).score([{"id": "b", "ticker": "AAPL", "title": "Apple misses estimates"}])
+    assert sc[0].scorer == "dicionario" and sc[0].sentiment < 0 and "túnel" in r.last_error
+
+
+def test_llm_router_openai_compatible(monkeypatch):
+    import requests
+    from app.llm import LLMRouter
+    monkeypatch.setenv("LLM_MODE", "local")
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://lmstudio:1234")
+    monkeypatch.setenv("LOCAL_LLM_KIND", "openai")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "qwen")
+
+    class R:
+        status_code = 200
+        def __init__(self, d): self._d = d
+        def json(self): return self._d
+        def raise_for_status(self): pass
+    monkeypatch.setattr(requests, "get", lambda url, **k: R({"data": [{"id": "qwen"}]}))
+    seen = {}
+    def post(url, json=None, **k):
+        seen.update(url=url, body=json)
+        return R({"choices": [{"message": {"content": '{"sentiment": 0.5}'}}]})
+    monkeypatch.setattr(requests, "post", post)
+    out, prov = LLMRouter().json("s", "u", {"type": "object"})
+    assert out == {"sentiment": 0.5} and prov == "local"
+    assert seen["url"].endswith("/v1/chat/completions") and seen["body"]["response_format"]["type"] == "json_schema"
+
+
+# ------------------------------------------------------------------ papel com dados reais
+class FakeAlpaca:
+    has_keys = True
+    feed = "iex"
+    def __init__(self): self.px = {"AAPL": 200.0, "BTCUSD": 70000.0}
+    def snapshots(self, epics): return {e: {"bid": self.px[e], "ask": self.px[e], "last": self.px[e]} for e in epics}
+    def candles(self, *a, **k): return []
+
+
+def test_paper_real_broker_uses_real_quotes_and_persists(tmp_path, monkeypatch):
+    from app import paper_real
+    from app.db import AppDB
+    monkeypatch.setattr(paper_real, "us_market_open", lambda at=None: True)
+    db = AppDB(tmp_path / "a.db")
+    data = FakeAlpaca()
+    b = paper_real.PaperRealBroker(data, db, start_balance=60)
+    b.update_quotes(data.snapshots(["AAPL"]))
+    res = b.open_position("AAPL", "BUY", 1, 198.0, 203.0)
+    assert res.ok and res.level > 200.0                        # compra no ask (com spread estimado)
+    b2 = paper_real.PaperRealBroker(data, db, start_balance=60)  # "reinício do servidor"
+    assert [p.deal_id for p in b2.positions()] == [res.deal_id]
+    data.px["AAPL"] = 203.5
+    closed = b2.update_quotes(data.snapshots(["AAPL"]))
+    assert closed and closed[0]["reason"] == "alvo" and b2.cash == pytest.approx(60 + (203.0 - res.level))
+    monkeypatch.setattr(paper_real, "us_market_open", lambda at=None: False)
+    r = b2.open_position("AAPL", "BUY", 1, 198, 203)
+    assert not r.ok and "fechado" in r.message
+    b2.update_quotes(data.snapshots(["BTCUSD"]))
+    assert b2.open_position("BTCUSD", "SELL", 0.001, 71000, 69000).ok   # cripto: 24h
+
+
+def test_alpaca_parsing_and_pagination():
+    from app.data.alpaca import AlpacaData
+
+    class R:
+        def __init__(self, d, code=200): self._d, self.status_code, self.text = d, code, ""
+        def json(self): return self._d
+
+    class H:
+        def __init__(self): self.calls = []
+        def get(self, url, params=None, headers=None, timeout=None):
+            self.calls.append((url, dict(params), headers))
+            if url.endswith("/v2/stocks/bars"):
+                if "page_token" not in params:
+                    return R({"bars": {"AAPL": [{"t": "2026-11-10T15:00:00Z", "o": 2, "h": 3, "l": 1, "c": 2.5, "v": 900}]},
+                              "next_page_token": "p2"})
+                return R({"bars": {"AAPL": [{"t": "2026-11-10T14:45:00Z", "o": 1, "h": 2, "l": 1, "c": 2, "v": 800}]},
+                          "next_page_token": None})
+            if url.endswith("/v2/stocks/snapshots"):
+                return R({"AAPL": {"latestQuote": {"bp": 199.9, "ap": 200.1}, "latestTrade": {"p": 200.0, "t": "x"},
+                                   "dailyBar": {"v": 12_000_000, "n": 90000, "vw": 199.5, "t": "2026-11-10T05:00:00Z"},
+                                   "prevDailyBar": {"v": 40_000_000, "c": 198}}})
+            return R({}, 404)
+
+    h = H()
+    a = AlpacaData("k", "s", "iex", http=h)
+    c = a.candles("AAPL", "MINUTE_15", 2)
+    assert [x.close for x in c] == [2, 2.5] and c[-1].volume == 900            # ordem cronológica, 2 páginas
+    assert h.calls[0][2]["APCA-API-KEY-ID"] == "k" and h.calls[0][1]["feed"] == "iex"
+    vol = a.consolidated_volume(["AAPL"])
+    assert vol["AAPL"]["day_volume"] == 12_000_000 and vol["AAPL"]["delayed"] is True
+    assert h.calls[-1][1]["feed"] == "delayed_sip"                                 # SIP com atraso no plano grátis
+    snap = a.snapshots(["AAPL"])
+    assert snap["AAPL"]["bid"] == 199.9 and snap["AAPL"]["ask"] == 200.1
+
+
+def test_research_heuristic_without_ai():
+
+    from app.research import ResearchAgent
+    ra = ResearchAgent.__new__(ResearchAgent)
+    d = {"preco": {"var_20d": 0.05, "acima_media_50": True, "acima_media_200": True},
+         "noticias_48h": [{"relevance": 1, "sentiment": 0.8}], "stocktwits": {"bull_ratio": 0.8, "bullish": 8, "bearish": 2}}
+    b = ra.heuristic(d)
+    assert b["bias"] > 0.5 and b["confidence"] <= 0.3 and len(b["drivers"]) == 3
+
+
+def test_session_fraction():
+    from app.runtime import Runtime
+    assert Runtime._session_fraction("2026-11-10T16:45:00Z") == pytest.approx(135 / 390)   # 11h45 em NY (horário de inverno)
+    assert Runtime._session_fraction(None) == 1.0
+
+
+def test_public_server_blocks_without_password_and_requires_login(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    for k, v in {"APP_MODE": "sim", "DATA_DIR": str(tmp_path), "DB_PATH": str(tmp_path / "t.db"), "WATCHLIST": "AAPL",
+                 "LOCAL_LLM_URL": "", "ANTHROPIC_API_KEY": ""}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    from app.main import create_app
+    from app.runtime import Runtime
+    from trader.config import get_settings
+    with TestClient(create_app(Runtime(get_settings()), public=True)) as c:
+        assert c.get("/api/health").json()["blocked"] is True
+        assert c.get("/api/state").status_code == 503
+    monkeypatch.setenv("APP_PASSWORD", "abc123")
+    with TestClient(create_app(Runtime(get_settings()), public=True)) as c:
+        assert c.get("/api/state").status_code == 401
+        assert c.post("/api/login", json={"password": "errada"}).status_code == 401
+        tok = c.post("/api/login", json={"password": "abc123"}).json()["token"]
+        assert c.get("/api/state", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+        assert c.get(f"/api/candles?epic=AAPL&token={tok}").status_code == 200        # token na URL (SSE)

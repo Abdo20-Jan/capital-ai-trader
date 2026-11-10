@@ -160,8 +160,28 @@ class CapitalClient:
                      tradeable=snap.get("marketStatus") == "TRADEABLE")
 
     def candles(self, epic: str, resolution: str = "MINUTE_15", count: int = 300) -> list[Candle]:
-        data = self._request("GET", f"/api/v1/prices/{epic}",
-                             params={"resolution": resolution, "max": min(count, 1000)})
+        """Busca `count` barras. A API entrega até 1000 por chamada; acima disso pagina para trás."""
+        out = self._candles_page(epic, resolution, min(count, 1000))
+        pages = 1
+        while len(out) < count and out and pages < 20:
+            oldest = out[0].time[:19]
+            try:
+                older = self._candles_page(epic, resolution, min(count - len(out), 1000), to=oldest)
+            except CapitalError as e:
+                log.warning("Paginação de %s parou: %s", epic, e)
+                break
+            older = [c for c in older if c.time[:19] < oldest]
+            if not older:
+                break
+            out = older + out
+            pages += 1
+        return out
+
+    def _candles_page(self, epic: str, resolution: str, count: int, to: str | None = None) -> list[Candle]:
+        params = {"resolution": resolution, "max": count}
+        if to:
+            params["to"] = to
+        data = self._request("GET", f"/api/v1/prices/{epic}", params=params)
         out = []
         for p in data.get("prices", []):
             def mid(k: str) -> float:

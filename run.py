@@ -7,6 +7,7 @@
   python run.py bot         roda o bot
   python run.py dashboard   abre o painel em http://localhost:8000
   python run.py all         bot + painel juntos
+  python run.py reset       recomeça a banca virtual (ex.: em $60) sem apagar o aprendizado
 """
 from __future__ import annotations
 
@@ -29,7 +30,8 @@ log = logging.getLogger("run")
 def make_broker(s):
     if s.broker == "paper":
         from trader.paper import PaperBroker
-        return PaperBroker([w.epic for w in s.watchlist], start_balance=s.start_balance, leverage=s.max_leverage)
+        return PaperBroker([w.epic for w in s.watchlist], start_balance=s.start_balance, leverage=s.max_leverage,
+                           history=max(600, s.history_bars))
     from trader.capital import CapitalClient
     return CapitalClient(s.capital_api_key, s.capital_identifier, s.capital_password)
 
@@ -93,7 +95,8 @@ def cmd_backtest(s) -> int:
     from trader.backtest import monte_carlo, run_backtest
     from trader.features import to_frame
     broker = make_broker(s)
-    frames = {w.epic: to_frame(broker.candles(w.epic, s.resolution, 1000)) for w in s.watchlist}
+    frames = {w.epic: to_frame(broker.candles(w.epic, s.resolution, s.history_bars)) for w in s.watchlist}
+    print("Barras por ativo: " + ", ".join(f"{e} {len(f)}" for e, f in frames.items()))
     rules = {w.epic: broker.rules(w.epic) for w in s.watchlist}
     res = run_backtest(frames, rules, s)
     print("=== Backtest walk-forward (período fora da amostra) ===")
@@ -133,7 +136,7 @@ def cmd_dashboard(s, port: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Bot de trading com IA para a conta DEMO da Capital.com")
-    ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all"])
+    ap.add_argument("command", choices=["check", "search", "train", "backtest", "bot", "dashboard", "all", "reset"])
     ap.add_argument("term", nargs="?", help="termo de busca (para 'search')")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--steps", type=int, default=None, help="número de ciclos (padrão: infinito)")
@@ -151,6 +154,15 @@ def main() -> int:
         return cmd_train(s)
     if a.command == "backtest":
         return cmd_backtest(s)
+    if a.command == "reset":
+        st = Store(s.db_path)
+        with st.conn() as c:
+            c.execute("DELETE FROM kv WHERE key IN ('baseline','status')")
+            c.execute("DELETE FROM equity")
+        st.event(f"Banca reiniciada em ${s.start_balance:.2f}", "info")
+        print(f"Banca virtual reiniciada: o próximo ciclo começa em ${s.start_balance:.2f}. "
+              "Histórico de notícias, sinais, trades e modelo foram mantidos.")
+        return 0
     if a.command == "dashboard":
         cmd_dashboard(s, a.port)
         return 0

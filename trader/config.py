@@ -64,6 +64,8 @@ class Settings:
     max_margin_usage: float = 0.5
     max_leverage: float = 200.0          # alavancagem máxima da conta (só usada pelo simulador)
     max_exposure: float = 30.0           # teto de exposição: valor nocional total ≤ 30× o patrimônio
+    stop_at_target: bool = True          # pausa novas entradas ao atingir a meta
+    history_bars: int = 3000             # barras por ativo usadas no treino/backtest
     stop_atr: float = 1.5
     take_profit_atr: float = 2.25
     prob_threshold: float = 0.50
@@ -111,6 +113,8 @@ def get_settings() -> Settings:
         max_margin_usage=_f("MAX_MARGIN_USAGE", 0.5),
         max_leverage=_f("MAX_LEVERAGE", 200.0),
         max_exposure=_f("MAX_EXPOSURE", 30.0),
+        stop_at_target=_s("STOP_AT_TARGET", "1").lower() not in ("0", "false", "nao", "não", "no"),
+        history_bars=_i("HISTORY_BARS", 3000),
         stop_atr=_f("STOP_ATR", 1.5),
         take_profit_atr=_f("TAKE_PROFIT_ATR", 2.25),
         prob_threshold=_f("PROB_THRESHOLD", 0.50),

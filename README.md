@@ -99,6 +99,19 @@ que é bem mais fraco: a maioria das manchetes reais sai como neutra.
   bater a meta é parecida com a de perder metade da conta.
 - Rode **meses** na demo antes de pensar em dinheiro real.
 
+## Banca virtual e modo aprendizado
+
+- **Banca virtual:** a conta demo costuma ter milhares de dólares. O bot opera como se
+  tivesse só `START_BALANCE` (ex.: $60): banca = $60 + lucro/prejuízo desde que começou.
+  `python run.py reset` recomeça a banca sem apagar notícias, sinais nem o modelo.
+- **Modo aprendizado:** `MAX_DAILY_LOSS=0` desliga a pausa diária e `STOP_AT_TARGET=0`
+  faz o bot continuar depois da meta. Gera mais trades executados para avaliar o bot,
+  mas o modelo aprende com todas as barras de preço, operando ou não; esses ajustes
+  não deixam o modelo mais inteligente.
+- **O que realmente melhora o modelo é mais histórico** (`HISTORY_BARS`). No simulador,
+  com o mesmo período de teste: 1000 barras → +0,13R por trade; 3000 → +0,22R;
+  6000 → +0,28R. Uma banca maior ($1000) deu exatamente o mesmo resultado em R.
+
 ## Alavancagem 1:200
 
 A alavancagem define quanto de **margem** cada posição prende, não quanto você arrisca.

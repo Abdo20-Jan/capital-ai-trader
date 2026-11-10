@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from .broker import Broker
+from .broker import Account, Broker
 from .config import Settings
 from .features import build_features, to_frame
 from .model import TradingModel, make_dataset, train_and_maybe_promote
@@ -49,7 +49,8 @@ class Engine:
         self.store = store
         self.scorer = scorer
         self.model = model or TradingModel.load(settings.model_dir)
-        self.guard = Guard(settings.start_balance, settings.target_balance, settings.max_daily_loss)
+        self.guard = Guard(settings.start_balance, settings.target_balance, settings.max_daily_loss,
+                           settings.stop_at_target)
         self._last_news = 0.0
         self._last_bar: dict[str, str] = {}
         self._guard_msg = ""
@@ -97,10 +98,33 @@ class Engine:
             self.store.event(f"Posição fechada {t['epic']} {t['direction']} ({deal_id}): {res}",
                              "win" if (pnl or 0) > 0 else "loss")
 
+    # ----------------------------------------------------------------- banca virtual
+    def virtual_account(self, real: Account) -> Account:
+        """Converte a conta real (ex.: demo com $10.000) na banca do bot (ex.: $60).
+
+        Na primeira execução grava o patrimônio real como referência; dali em diante
+        banca = START_BALANCE + (patrimônio real − referência). Mudar START_BALANCE
+        ou rodar `python run.py reset` cria uma nova referência.
+        """
+        base = self.store.get("baseline")
+        if not base or base.get("start") != self.s.start_balance:
+            base = {"equity": real.equity, "balance": real.balance, "start": self.s.start_balance,
+                    "time": time.time()}
+            self.store.set("baseline", base)
+            if abs(real.equity - self.s.start_balance) > 0.01:
+                self.store.event(f"Banca virtual de ${self.s.start_balance:.2f} sobre a conta de "
+                                 f"${real.equity:,.2f} (referência gravada)", "info")
+        equity = self.s.start_balance + (real.equity - base["equity"])
+        balance = self.s.start_balance + (real.balance - base["balance"])
+        # a margem livre do bot nunca passa do que a banca virtual tem nem do que a conta real tem
+        available = min(real.available, equity - (real.equity - real.available))
+        return Account(balance=balance, equity=equity, available=available, currency=real.currency)
+
     # ----------------------------------------------------------------- ciclo
     def step(self) -> None:
         self.ingest_news()
-        acct = self.broker.account()
+        real = self.broker.account()
+        acct = self.virtual_account(real)
         self.store.add_equity(acct.balance, acct.equity)
         positions = self.broker.positions()
         self.sync_positions(positions)
@@ -114,7 +138,9 @@ class Engine:
                                   "model": self.model.report.version if self.model.ready else None,
                                   "can_trade": can_trade, "guard": msg, "updated": time.time(),
                                   "start": self.s.start_balance, "target": self.s.target_balance,
-                                  "watchlist": [w.epic for w in self.s.watchlist]})
+                                  "watchlist": [w.epic for w in self.s.watchlist],
+                                  "real_equity": real.equity, "learning": self.s.max_daily_loss <= 0
+                                  or not self.s.stop_at_target})
 
         open_epics = {p.epic for p in positions}
         self._margin_in_use = 0.0
@@ -219,7 +245,8 @@ class Engine:
         return direction, f"aberta {res.deal_id}"
 
     # ----------------------------------------------------------------- treino
-    def retrain(self, count: int = 1000) -> object:
+    def retrain(self, count: int | None = None) -> object:
+        count = count or self.s.history_bars
         frames, sentiment = {}, {}
         for w in self.s.watchlist:
             df = to_frame(self.broker.candles(w.epic, self.s.resolution, count))

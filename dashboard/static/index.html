@@ -185,7 +185,7 @@ function renderGoal(st) {
   const stale = status.updated ? (Date.now() / 1000 - status.updated) > 300 : true;
   $("pipeline").classList.toggle("idle", stale);
   $("goal").innerHTML = `
-    <h2>Meta <small>${money(start)} → ${money(target)}</small></h2>
+    <h2>Meta <small>banca do bot · ${money(start)} → ${money(target)}</small></h2>
     <div class="goal-top"><div class="hero">${money(eq)}</div><div class="mono ${updn(eq - start)}">${signed((eq / start - 1) * 100, 1)}%</div></div>
     <div class="goal-bar" role="progressbar" aria-valuenow="${Math.round(pct * 100)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct * 100}%"></i></div>
     <div class="goal-scale"><span>${money(start)}</span><span>${Math.round(pct * 100)}% do caminho</span><span>${money(target)}</span></div>
@@ -200,6 +200,8 @@ function renderGoal(st) {
     <span class="chip">sentimento <b>${esc(status.scorer || "—")}</b></span>
     <span class="chip">modelo <b>${esc(status.model || "nenhum")}</b></span>
     <span class="chip">barra <b>${esc(st.settings.resolution)}</b></span>
+    ${status.real_equity != null && Math.abs(status.real_equity - eq) > 0.01 ? `<span class="chip">conta real <b>${money(status.real_equity)}</b></span>` : ""}
+    ${status.learning ? `<span class="chip">modo <b>aprendizado</b></span>` : ""}
     <button class="chip" id="theme" type="button">tema</button>`;
   $("theme").onclick = () => {
     const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");

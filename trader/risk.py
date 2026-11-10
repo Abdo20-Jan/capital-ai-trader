@@ -76,16 +76,17 @@ class Guard:
     start_balance: float
     target_balance: float
     max_daily_loss: float
+    stop_at_target: bool = True
     day_start_equity: float | None = None
     day: str = ""
 
     def check(self, equity: float, today: str) -> tuple[bool, str]:
         if today != self.day or self.day_start_equity is None:
             self.day, self.day_start_equity = today, equity
-        if equity >= self.target_balance:
+        if equity >= self.target_balance and self.stop_at_target:
             return False, f"META ATINGIDA: ${equity:.2f} ≥ ${self.target_balance:.2f} — novas entradas pausadas"
         dd = (self.day_start_equity - equity) / self.day_start_equity if self.day_start_equity else 0
-        if dd >= self.max_daily_loss:
+        if self.max_daily_loss > 0 and dd >= self.max_daily_loss:
             return False, f"limite de perda diária atingido ({dd:.1%}) — pausado até amanhã"
         if equity <= self.start_balance * 0.5:
             return False, f"conta caiu 50% (${equity:.2f}) — bot parado para revisão"

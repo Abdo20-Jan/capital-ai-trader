@@ -209,3 +209,56 @@ def test_exposure_cap_with_200x_leverage():
     assert d.ok and d.notional <= 60 * 30 + 1e-6
     assert d.risk_amount < 1.2            # exposição limitada → risco menor que 2%
     assert d.margin == pytest.approx(d.notional / 200)
+
+
+# ------------------------------------------------------------------ banca virtual / modo aprendizado
+def test_virtual_bankroll_on_big_demo_account(tmp_path):
+    s = Settings(watchlist=[WatchItem("AAPL", "AAPL")], db_path=tmp_path / "t.db", model_dir=tmp_path / "m")
+    eng = Engine(s, PaperBroker(["AAPL"], seed=1), Store(s.db_path), LexiconScorer())
+    v = eng.virtual_account(Account(balance=10_000, equity=10_000, available=10_000))
+    assert v.equity == pytest.approx(60) and v.available == pytest.approx(60)
+    v = eng.virtual_account(Account(balance=10_000, equity=10_012, available=9_990))
+    assert v.equity == pytest.approx(72)                 # +$12 de lucro desde a referência
+    assert v.available == pytest.approx(50)              # 72 − 22 de margem em uso
+    ok, _ = eng.guard.check(v.equity, "d1")
+    assert ok                                            # não confunde $10.000 com "meta atingida"
+
+
+def test_learning_mode_disables_daily_stop_and_target():
+    g = Guard(start_balance=60, target_balance=100, max_daily_loss=0, stop_at_target=False)
+    assert g.check(60, "d1")[0]
+    assert g.check(50, "d1")[0]                          # −17% no dia, sem pausa
+    assert g.check(150, "d1")[0]                         # passou da meta, continua
+
+
+def test_candles_pagination():
+    from trader.capital import CapitalClient
+
+    class PagingHTTP(FakeHTTP):
+        def request(self, method, url, params=None, json=None, timeout=None, headers=None):
+            if "/api/v1/prices/" not in url:
+                return super().request(method, url, params, json, timeout, headers)
+            self.calls.append(params)
+            end = datetime(2026, 11, 10, 12, 0)
+            if params.get("to"):
+                end = datetime.fromisoformat(params["to"]) - timedelta(minutes=15)
+            n = min(params["max"], 1000)
+            start = end - timedelta(minutes=15 * (n - 1))
+            if start < datetime(2026, 9, 1):                     # histórico "acaba" aqui
+                start = datetime(2026, 9, 1)
+            p = {"bid": 1, "ask": 1}
+            prices, t = [], start
+            while t <= end:
+                prices.append({"snapshotTimeUTC": t.isoformat(), "openPrice": p, "closePrice": p,
+                               "highPrice": p, "lowPrice": p})
+                t += timedelta(minutes=15)
+            return FakeResp(200, {"prices": prices})
+
+    http = PagingHTTP()
+    c = CapitalClient("key", "me", "pw", http=http)
+    bars = c.candles("AAPL", "MINUTE_15", 2500)
+    assert len(bars) == 2500
+    times = [b.time for b in bars]
+    assert times == sorted(times) and len(set(times)) == len(times)
+    assert len(http.calls) == 3
+    assert len(c.candles("AAPL", "MINUTE_15", 9000)) < 9000           # para quando o histórico acaba

@@ -15,6 +15,11 @@ import logging
 import sys
 import threading
 
+if sys.version_info < (3, 10):
+    sys.exit(f"Este projeto precisa de Python 3.10 ou mais novo (você está usando {sys.version.split()[0]}).\n"
+             "No Mac: instale o Python 3.12 em https://www.python.org/downloads/ ou com 'brew install python@3.12',\n"
+             "depois crie o ambiente com: python3.12 -m venv .venv && source .venv/bin/activate")
+
 from trader.config import get_settings
 from trader.store import Store
 

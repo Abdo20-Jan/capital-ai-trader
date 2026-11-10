@@ -203,7 +203,11 @@ class NewsAgent(BaseAgent):
         if time.time() - self.cooldown.get(epic, 0) < p.get("cooldown_min", 30) * 60 / max(self.ctx.speed, 1):
             self.state[epic] = {"note": f"em pausa após trade recente: {title}"}
             return
-        df = await self.ctx.market.candles(epic, self.cfg.resolution, 60)
+        try:
+            df = await self.ctx.market.candles(epic, self.cfg.resolution, 60)
+        except Exception as e:  # noqa: BLE001 — ativo sem dados reais: ignora a notícia, sem erro
+            self.state[epic] = {"note": f"sem dados reais: {e}"}
+            return
         if len(df) < 20:
             return
         a = float(indicators(df.iloc[:-1])["atr"].iloc[-1])

@@ -463,3 +463,24 @@ def test_scanner_updates_universe(monkeypatch):
     asyncio.run(sc.scan())
     assert [w.epic for w in got["items"]] == ["AAPL", "GOLD"] and got["names"]["GOLD"]["type"] == "COMMODITIES"
     assert "sem cripto" in sc.status and sc.info()["eligible_by_type"] == {"SHARES": 1, "COMMODITIES": 1}
+
+
+def test_news_agent_skips_asset_without_data():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from app.agents.strategies import NewsAgent, default_agents
+    cfg = next(c for cls, c in default_agents() if c.key == "news")
+
+    async def no_data(*a, **k):
+        raise RuntimeError("chaves da Alpaca não configuradas")
+    submitted = []
+
+    async def submit(*a, **k):
+        submitted.append(a)
+    ctx = SimpleNamespace(epic_for_ticker=lambda t: "AAPL", now=lambda: datetime.now(timezone.utc), speed=1,
+                          market=SimpleNamespace(candles=no_data), orders=SimpleNamespace(submit=submit))
+    ag = NewsAgent(cfg, ctx)
+    item = {"ticker": "AAPL", "title": "Apple beats", "relevance": 0.9, "sentiment": 0.9,
+            "time": datetime.now(timezone.utc).isoformat()}
+    asyncio.run(ag._consider(item))                       # não pode lançar exceção
+    assert "sem dados reais" in ag.state["AAPL"]["note"] and not submitted
